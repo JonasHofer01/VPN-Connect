@@ -219,15 +219,14 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
         _we_installed_tunnel = False
         return config_path
 
-    # Dienst existiert aber gestoppt → starten
+    # Dienst existiert aber gestoppt → erstmal aufräumen, dann sauber installieren
     state = _service_state(tn)
     if state in ("STOPPED", "UNKNOWN"):
+        log(f"Raeume alten Dienst auf: {sn} (state={state})")
         try:
-            _run_silent(["net", "start", sn], capture_output=True)
-            if wait_for_tunnel(tn):
-                log(f"Dienst '{sn}' gestartet.")
-                _we_installed_tunnel = False
-                return config_path
+            _run_silent(["sc", "delete", sn],
+                        capture_output=True, text=True, timeout=10)
+            time.sleep(2)
         except Exception:
             pass
 
@@ -256,17 +255,16 @@ def disconnect_vpn(config_path: str) -> None:
 
     state = _service_state(tn)
     if not state:
-        log(f"Dienst '{sn}' existiert nicht.")
+        log(f"Dienst '{sn}' existiert nicht – nichts zu tun.")
         _we_installed_tunnel = False
         return
 
-    # Dienst stoppen (sc stop zeigt keine GUI-Dialoge)
+    # Dienst stoppen
     if state == "RUNNING":
         log(f"Stoppe Tunnel: {tn}")
         try:
             _run_silent(["sc", "stop", sn],
                         capture_output=True, text=True, timeout=15)
-            # Kurz warten bis Dienst wirklich gestoppt ist
             for _ in range(10):
                 time.sleep(1)
                 st = _service_state(tn)
@@ -276,20 +274,27 @@ def disconnect_vpn(config_path: str) -> None:
         except Exception as e:
             log(f"Stopp Fehler: {e}", "warning")
 
-    # Dienst löschen – nur wenn WIR ihn installiert haben
+    # Dienst IMMER löschen wenn WIR ihn installiert haben
+    # (verhindert verwaiste Services die beim nächsten Connect Fehler-Dialoge verursachen)
     if _we_installed_tunnel:
-        # Nochmal prüfen ob Dienst überhaupt noch existiert
-        if _service_state(tn):
-            log(f"Entferne Tunnel-Dienst: {tn}")
+        for attempt in range(3):
+            st = _service_state(tn)
+            if not st:
+                log("Tunnel-Dienst bereits entfernt.")
+                break
+            log(f"Entferne Tunnel-Dienst: {tn} (Versuch {attempt + 1})")
             try:
                 r = _run_silent(["sc", "delete", sn],
                                 capture_output=True, text=True, timeout=15)
                 if r.returncode == 0:
                     log("Tunnel-Dienst entfernt.")
+                    break
                 else:
-                    log(f"sc delete rc={r.returncode}", "warning")
+                    log(f"sc delete rc={r.returncode}, warte...", "warning")
+                    time.sleep(2)
             except Exception as e:
                 log(f"Entfernen Fehler: {e}", "warning")
+                time.sleep(2)
 
     _we_installed_tunnel = False
 
