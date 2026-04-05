@@ -19,7 +19,7 @@ from urllib import request, error
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -1120,10 +1120,10 @@ class VPNApp:
         self.upsnap_hint.pack_forget()
 
         if not devices:
-            l = tk.Label(self.device_frame, text="Keine Geraete.",
-                         bg=C["card"], fg=C["dim"], font=("Segoe UI", 9))
-            l.pack(pady=4)
-            self._device_widgets.append(l)
+            lbl = tk.Label(self.device_frame, text="Keine Geraete.",
+                           bg=C["card"], fg=C["dim"], font=("Segoe UI", 9))
+            lbl.pack(pady=4)
+            self._device_widgets.append(lbl)
             self.btn_login.configure(state="normal")
             return
 
@@ -1131,15 +1131,14 @@ class VPNApp:
             row = tk.Frame(self.device_frame, bg=C["surface"], pady=7, padx=12)
             row.pack(fill="x", pady=2)
             self._device_widgets.append(row)
-
             row.columnconfigure(1, weight=1)
 
-            name = d.get("name", "?")
-            ip = d.get("ip", "?")
+            name  = d.get("name", "?")
+            ip    = d.get("ip", "?")
             online = d.get("status") == "online"
-            dot_c = C["green"] if online else C["dim"]
+            dot_c  = C["green"] if online else C["dim"]
 
-            # Status-Punkt
+            # Status-Punkt (Canvas)
             dot = tk.Canvas(row, width=10, height=10, bg=C["surface"],
                             highlightthickness=0)
             dot.create_oval(1, 1, 9, 9, fill=dot_c, outline=dot_c)
@@ -1155,43 +1154,91 @@ class VPNApp:
                      font=("Segoe UI", 9), anchor="w"
                      ).grid(row=0, column=2, padx=(8, 12), sticky="w")
 
-            did, dip, dn = d.get("id", ""), ip, name
+            # Status-Label (Offline / Einschalten... / Online)
+            init_txt = "Online" if online else "Offline"
+            init_col = C["green"] if online else C["dim"]
+            status_lbl = tk.Label(row, text=init_txt, bg=C["surface"],
+                                  fg=init_col, font=("Segoe UI", 8, "bold"),
+                                  width=11, anchor="w")
+            status_lbl.grid(row=0, column=3, padx=(0, 10), sticky="w")
 
-            # Buttons Frame
+            # Buttons
             btns = tk.Frame(row, bg=C["surface"])
-            btns.grid(row=0, column=3, sticky="e")
+            btns.grid(row=0, column=4, sticky="e")
+
+            did, dip, dn = d.get("id", ""), ip, name
+            btn_refs: List[ttk.Button] = []
 
             if online:
-                # Online: nur RDP anbieten
-                ttk.Button(btns, text="RDP", style="Small.TButton",
-                           command=lambda x=dip, n=dn: self._on_rdp(x, n)
-                           ).pack(side="left", padx=(0, 4))
+                b = ttk.Button(btns, text="RDP", style="Small.TButton",
+                               command=lambda x=dip, n=dn, bl=btn_refs,
+                                              sl=status_lbl:
+                               self._on_rdp(x, n, bl, sl))
+                b.pack(side="left", padx=(0, 4))
+                btn_refs.append(b)
             else:
-                # Offline: WoL und WoL+RDP anbieten
-                ttk.Button(btns, text="WoL", style="Small.TButton",
-                           command=lambda x=did, n=dn: self._on_wake(x, n)
-                           ).pack(side="left", padx=(0, 4))
-                ttk.Button(btns, text="WoL + RDP", style="Small.TButton",
-                           command=lambda x=did, y=dip, n=dn:
-                               self._on_wake_rdp(x, y, n, False)
-                           ).pack(side="left", padx=(0, 4))
+                b1 = ttk.Button(btns, text="WoL", style="Small.TButton",
+                                command=lambda x=did, n=dn, bl=btn_refs,
+                                               sl=status_lbl:
+                                self._on_wake(x, n, bl, sl))
+                b1.pack(side="left", padx=(0, 4))
+
+                b2 = ttk.Button(btns, text="WoL + RDP", style="Small.TButton",
+                                command=lambda x=did, y=dip, n=dn,
+                                               bl=btn_refs, sl=status_lbl:
+                                self._on_wake_rdp(x, y, n, bl, sl))
+                b2.pack(side="left", padx=(0, 4))
+
+                btn_refs += [b1, b2]
 
         self.btn_login.configure(state="normal")
 
+    # ── Hilfsmethoden für Device-Status ──────────────────────────────────
+
+    @staticmethod
+    def _set_device_status(status_lbl: tk.Label,
+                           text: str, color: str):
+        """Setzt den Status-Text eines Geräts (thread-safe via after)."""
+        try:
+            status_lbl.configure(text=text, fg=color)
+        except tk.TclError:
+            pass  # Widget bereits zerstört
+
+    @staticmethod
+    def _set_btns(btn_refs: list, state: str):
+        for b in btn_refs:
+            try:
+                b.configure(state=state)
+            except tk.TclError:
+                pass
+
     # ── Device Actions ────────────────────────────────────────────────────
 
-    def _on_wake(self, did: str, name: str):
+    def _on_wake(self, did: str, name: str,
+                 btn_refs: list, status_lbl: tk.Label):
         if not self.upsnap:
             return
+        self._set_btns(btn_refs, "disabled")
+        self._set_device_status(status_lbl, "WoL senden...", C["yellow"])
         log(f"WoL -> '{name}'")
-        threading.Thread(target=lambda: self.upsnap.wake(did), daemon=True).start()
 
-    def _on_rdp(self, ip: str, name: str):
+        def work():
+            self.upsnap.wake(did)
+            self.root.after(0, lambda: self._set_device_status(
+                status_lbl, "Einschalten...", C["orange"]))
+            self.root.after(3000, lambda: self._set_btns(btn_refs, "normal"))
+            self.root.after(3000, lambda: self._set_device_status(
+                status_lbl, "Offline", C["dim"]))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_rdp(self, ip: str, name: str,
+                btn_refs: list = None, status_lbl: tk.Label = None):
         log(f"RDP -> '{name}' ({ip})")
+        if btn_refs:
+            self._set_btns(btn_refs, "disabled")
+        if status_lbl:
+            self._set_device_status(status_lbl, "RDP starten...", C["cyan"])
         try:
-            # .rdp-Datei erstellen und über explorer.exe öffnen.
-            # explorer.exe läuft IMMER als normaler Benutzer (de-eleviert).
-            # mstsc.exe direkt als Admin gestartet kann das Bild nicht rendern.
             rdp_path = os.path.join(
                 os.environ.get("TEMP", _base_dir), f"_vpn_{name}.rdp")
             with open(rdp_path, "w") as f:
@@ -1199,20 +1246,37 @@ class VPNApp:
                 f.write("prompt for credentials:i:1\n")
                 f.write("authentication level:i:0\n")
             subprocess.Popen(["explorer.exe", rdp_path])
-            log(f"RDP-Datei geöffnet: {rdp_path}")
+            log(f"RDP gestartet: {rdp_path}")
+            if status_lbl:
+                self.root.after(2000, lambda: self._set_device_status(
+                    status_lbl, "Online", C["green"]))
+            # Temp-Datei nach 8s löschen (mstsc hat sie dann schon gelesen)
+            def _del():
+                time.sleep(8)
+                try:
+                    os.remove(rdp_path)
+                    log(f"Temp-RDP gelöscht: {rdp_path}")
+                except OSError:
+                    pass
+            threading.Thread(target=_del, daemon=True).start()
         except Exception as e:
             log(f"RDP Fehler: {e}", "error")
+        finally:
+            if btn_refs:
+                self.root.after(3000, lambda: self._set_btns(btn_refs, "normal"))
 
-    def _on_wake_rdp(self, did: str, ip: str, name: str, online: bool):
-        if online:
-            self._on_rdp(ip, name)
-            return
+    def _on_wake_rdp(self, did: str, ip: str, name: str,
+                     btn_refs: list, status_lbl: tk.Label):
         if not self.upsnap:
             return
+        self._set_btns(btn_refs, "disabled")
+        self._set_device_status(status_lbl, "WoL senden...", C["yellow"])
         log(f"WoL + RDP -> '{name}'")
 
         def work():
             self.upsnap.wake(did)
+            self.root.after(0, lambda: self._set_device_status(
+                status_lbl, "Einschalten...", C["orange"]))
             log(f"Warte auf '{name}' (max 120s)...")
             t0 = time.time()
             while time.time() - t0 < 120:
@@ -1222,19 +1286,31 @@ class VPNApp:
                     s.connect((ip, 3389))
                     s.close()
                     log(f"'{name}' bereit!")
-                    time.sleep(5)
-                    self.root.after(0, lambda: self._on_rdp(ip, name))
+                    self.root.after(0, lambda: self._set_device_status(
+                        status_lbl, "Online", C["green"]))
+                    time.sleep(3)
+                    self.root.after(0, lambda: self._on_rdp(
+                        ip, name, btn_refs, status_lbl))
                     return
                 except Exception:
                     pass
-                log(f"  Warte... ({int(time.time() - t0)}s)")
+                elapsed = int(time.time() - t0)
+                self.root.after(0, lambda e=elapsed: self._set_device_status(
+                    status_lbl, f"Warte {e}s...", C["orange"]))
+                log(f"  Warte... ({elapsed}s)")
                 time.sleep(2)
+
             log(f"'{name}' nicht erreichbar.", "warning")
+            self.root.after(0, lambda: self._set_device_status(
+                status_lbl, "Timeout", C["red"]))
+            self.root.after(0, lambda: self._set_btns(btn_refs, "normal"))
             if messagebox.askyesno("Timeout",
                                     f"'{name}' antwortet nicht.\nRDP trotzdem starten?"):
-                self.root.after(0, lambda: self._on_rdp(ip, name))
+                self.root.after(0, lambda: self._on_rdp(
+                    ip, name, btn_refs, status_lbl))
 
         threading.Thread(target=work, daemon=True).start()
+
 
 
 # =============================================================================
