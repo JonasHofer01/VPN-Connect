@@ -1,0 +1,34 @@
+# Build
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs & Output
+*.log
+build_out.txt
+pip_out.txt
+
+# EXE (wird via GitHub Releases verteilt)
+*.exe
+
+# WireGuard Configs (sensibel!)
+*.conf
+*.conf.dpapi
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
