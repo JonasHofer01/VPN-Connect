@@ -759,6 +759,7 @@ class AppSignals(QObject):
     show_devices_signal = pyqtSignal(list)
     enable_refresh_signal = pyqtSignal()
     enable_login_signal = pyqtSignal()
+    logged_in_signal = pyqtSignal()
     update_available_signal = pyqtSignal(dict)
     update_progress_signal = pyqtSignal(str)
     update_failed_signal = pyqtSignal()
@@ -862,6 +863,7 @@ class VPNApp(QMainWindow):
             lambda: self.btn_refresh_devices.setEnabled(True))
         self.sig.enable_login_signal.connect(
             lambda: self.btn_login.setEnabled(True))
+        self.sig.logged_in_signal.connect(self._on_logged_in)
         self.sig.update_available_signal.connect(self._show_update_btn)
         self.sig.update_progress_signal.connect(
             lambda t: self.btn_update.setText(t))
@@ -985,9 +987,9 @@ class VPNApp(QMainWindow):
         login_row = QHBoxLayout()
         login_row.setSpacing(6)
 
-        lbl_email = QLabel("E-Mail")
-        lbl_email.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
-        login_row.addWidget(lbl_email)
+        self.lbl_email = QLabel("E-Mail")
+        self.lbl_email.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        login_row.addWidget(self.lbl_email)
         self.entry_user = QLineEdit()
         self.entry_user.setFixedWidth(180)
         self.entry_user.returnPressed.connect(lambda: self.entry_pass.setFocus())
@@ -995,9 +997,9 @@ class VPNApp(QMainWindow):
 
         login_row.addSpacing(6)
 
-        lbl_pw = QLabel("Passwort")
-        lbl_pw.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
-        login_row.addWidget(lbl_pw)
+        self.lbl_pw = QLabel("Passwort")
+        self.lbl_pw.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        login_row.addWidget(self.lbl_pw)
         self.entry_pass = QLineEdit()
         self.entry_pass.setFixedWidth(140)
         self.entry_pass.setEchoMode(QLineEdit.EchoMode.Password)
@@ -1318,6 +1320,11 @@ class VPNApp(QMainWindow):
     # ── UpSnap Login ───────────────────────────────────────────────────────
 
     def _on_upsnap_login(self):
+        # Wenn bereits angemeldet → Abmelden
+        if self.upsnap is not None:
+            self._on_logout()
+            return
+
         u = self.entry_user.text().strip()
         p = self.entry_pass.text().strip()
         if not u or not p:
@@ -1333,6 +1340,7 @@ class VPNApp(QMainWindow):
                     devs = c.get_devices()
                     self.sig.show_devices_signal.emit(devs)
                     self.sig.enable_refresh_signal.emit()
+                    self.sig.logged_in_signal.emit()
                     # Credentials speichern (muss im Main-Thread)
                     QTimer.singleShot(0, lambda: self._save_credentials(u, p))
                     QTimer.singleShot(0, self._start_auto_refresh)
@@ -1342,6 +1350,36 @@ class VPNApp(QMainWindow):
                 log(f"UpSnap Login Fehler: {e}", "error")
                 self.sig.enable_login_signal.emit()
         threading.Thread(target=work, daemon=True).start()
+
+    def _on_logged_in(self):
+        """UI nach erfolgreichem Login umschalten."""
+        self.btn_login.setText("Abmelden")
+        self.btn_login.setEnabled(True)
+        self.lbl_email.hide()
+        self.entry_user.hide()
+        self.lbl_pw.hide()
+        self.entry_pass.hide()
+
+    def _on_logout(self):
+        """Abmelden und UI zurücksetzen."""
+        self.upsnap = None
+        self._stop_auto_refresh()
+
+        # Geräte-Widgets entfernen
+        for w in self._device_widgets:
+            w.setParent(None)
+            w.deleteLater()
+        self._device_widgets.clear()
+        self.upsnap_hint.show()
+
+        # UI zurücksetzen
+        self.btn_login.setText("Anmelden")
+        self.lbl_email.show()
+        self.entry_user.show()
+        self.lbl_pw.show()
+        self.entry_pass.show()
+        self.btn_refresh_devices.setEnabled(False)
+        log("UpSnap abgemeldet.")
 
     def _on_refresh_devices(self):
         if not self.upsnap:
