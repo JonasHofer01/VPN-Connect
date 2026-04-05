@@ -24,7 +24,7 @@ from PyQt6.QtGui import QFont, QColor, QPainter
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
