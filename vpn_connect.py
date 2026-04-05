@@ -160,6 +160,9 @@ def wait_for_tunnel(tunnel_name: str, timeout: int = 30) -> bool:
     log(f"Warte auf Tunnel '{tunnel_name}' (max {timeout}s)...")
     start = time.time()
     while time.time() - start < timeout:
+        if _cancel_event.is_set():
+            log("Tunnel-Warten abgebrochen.", "warning")
+            return False
         try:
             if _service_state(tunnel_name) != "RUNNING":
                 raise RuntimeError("not running")
@@ -181,6 +184,8 @@ def wait_for_tunnel(tunnel_name: str, timeout: int = 30) -> bool:
 def check_connection(ip: str, port: int, timeout: int = 5,
                      retries: int = 5, delay: float = 2.0) -> bool:
     for i in range(1, retries + 1):
+        if _cancel_event.is_set():
+            return False
         log(f"Verbindungstest {ip}:{port} ({i}/{retries})...")
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -225,29 +230,89 @@ def _wait_service_gone(tn: str, timeout: int = 15) -> bool:
     return not _service_state(tn)
 
 
-def _dismiss_error_dialogs(duration: int = 10):
-    """Hintergrund-Thread: schließt automatisch alle 'Fehler'-Dialoge
-    die von wireguard.exe erzeugt werden (MessageBox).
-    Läuft 'duration' Sekunden lang."""
+# ── Dialog-Auto-Schließer ────────────────────────────────────────────────
+
+_dismiss_running = False
+
+
+def _start_dialog_dismisser():
+    """Startet einen permanenten Hintergrund-Thread der WireGuard-Fehler-Dialoge
+    automatisch schließt, solange die App läuft."""
+    global _dismiss_running
+    if _dismiss_running:
+        return
+    _dismiss_running = True
+    threading.Thread(target=_dialog_dismisser_loop, daemon=True).start()
+
+
+def _dialog_dismisser_loop():
+    """Permanenter Loop: sucht und schließt 'Fehler'-Dialoge."""
     user32 = ctypes.windll.user32
+
+    # Win32 API Konstanten
+    GW_CHILD = 5
+    WM_GETTEXT = 0x000D
+    WM_GETTEXTLENGTH = 0x000E
+    BM_CLICK = 0x00F5
     WM_CLOSE = 0x0010
-    end = time.time() + duration
-    while time.time() < end:
+    DIALOG_CLASS = "#32770"
+
+    EnumWindows = user32.EnumWindows
+    GetWindowTextW = user32.GetWindowTextW
+    GetClassNameW = user32.GetClassNameW
+    FindWindowExW = user32.FindWindowExW
+    SendMessageW = user32.SendMessageW
+    PostMessageW = user32.PostMessageW
+    IsWindowVisible = user32.IsWindowVisible
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    while True:
         try:
-            # Suche nach Fenstern mit Titel "Fehler" (deutscher Windows MessageBox-Titel)
-            for title in ("Fehler", "Error"):
-                hwnd = user32.FindWindowW(None, title)
-                if hwnd:
-                    user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
-                    log(f"Fehler-Dialog automatisch geschlossen.", "info")
+            found_windows = []
+
+            def enum_callback(hwnd, _):
+                if not IsWindowVisible(hwnd):
+                    return True
+                # Fenster-Titel lesen
+                buf = ctypes.create_unicode_buffer(256)
+                GetWindowTextW(hwnd, buf, 256)
+                title = buf.value
+                # Klasse lesen
+                cls_buf = ctypes.create_unicode_buffer(256)
+                GetClassNameW(hwnd, cls_buf, 256)
+                cls = cls_buf.value
+
+                if title in ("Fehler", "Error") and cls == DIALOG_CLASS:
+                    found_windows.append(hwnd)
+                return True
+
+            EnumWindows(WNDENUMPROC(enum_callback), 0)
+
+            for hwnd in found_windows:
+                log("Fehler-Dialog erkannt → schließe automatisch.")
+                # Versuche OK-Button zu finden und zu klicken
+                btn = FindWindowExW(hwnd, None, "Button", None)
+                if btn:
+                    SendMessageW(btn, BM_CLICK, 0, 0)
+                else:
+                    # Fallback: WM_CLOSE senden
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0)
+
         except Exception:
             pass
-        time.sleep(0.3)
+        time.sleep(0.2)
+
+
+# ── Cancel-Mechanismus ───────────────────────────────────────────────────
+
+_cancel_event = threading.Event()
 
 
 def connect_vpn(config_path: Optional[str]) -> Optional[str]:
     global _we_installed_tunnel
     _we_installed_tunnel = False
+    _cancel_event.clear()
 
     if not config_path:
         log("Keine Konfiguration.", "error")
@@ -257,11 +322,18 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
     sn = f"WireGuardTunnel${tn}"
     log(f"Tunnel: {tn}")
 
+    # Dialog-Schließer sicherstellen
+    _start_dialog_dismisser()
+
     # Bereits laufend?
     if _service_state(tn) == "RUNNING":
         log(f"'{sn}' laeuft bereits.")
         _we_installed_tunnel = False
         return config_path
+
+    if _cancel_event.is_set():
+        log("Verbindung abgebrochen.", "warning")
+        return None
 
     # Alten Dienst aufräumen (Reste vom letzten Mal)
     state = _service_state(tn)
@@ -275,10 +347,11 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
                     capture_output=True, text=True, timeout=10)
         _wait_service_gone(tn)
 
-    # Dialog-Schließer starten (schließt automatisch "Fehler"-Dialoge)
-    threading.Thread(target=_dismiss_error_dialogs, args=(15,), daemon=True).start()
+    if _cancel_event.is_set():
+        log("Verbindung abgebrochen.", "warning")
+        return None
 
-    # Tunnel installieren via WireGuard (funktioniert nur über den Manager)
+    # Tunnel installieren via WireGuard Manager
     try:
         log(f"Installiere Tunnel: {config_path}")
         _run_silent(["wireguard", "/installtunnelservice", config_path],
@@ -301,14 +374,14 @@ def disconnect_vpn(config_path: str) -> None:
     tn = extract_tunnel_name(config_path)
     sn = f"WireGuardTunnel${tn}"
 
+    # Dialog-Schließer sicherstellen
+    _start_dialog_dismisser()
+
     state = _service_state(tn)
     if not state:
         log(f"Dienst '{sn}' existiert nicht – nichts zu tun.")
         _we_installed_tunnel = False
         return
-
-    # Dialog-Schließer starten
-    threading.Thread(target=_dismiss_error_dialogs, args=(10,), daemon=True).start()
 
     # Dienst stoppen (sc.exe = Konsolen-App → zeigt selbst keine GUI-Dialoge)
     if state == "RUNNING":
@@ -625,6 +698,7 @@ class VPNApp:
             ("Disconnect.TButton", C["red"],   "#ffffff",  "#fca5a5"),
             ("Action.TButton",  C["surface"], C["fg"],    C["border"]),
             ("Login.TButton",   C["accent"],  "#ffffff",  C["accent_h"]),
+            ("Cancel.TButton",  C["orange"],  "#000000",  C["yellow"]),
         ]:
             s.configure(name, background=bg, foreground=fg,
                         font=("Segoe UI", 9, "bold"), padding=(14, 7),
@@ -736,6 +810,11 @@ class VPNApp:
                                           command=self._on_disconnect,
                                           state="disabled")
         self.btn_disconnect.pack(side="left", padx=(8, 0))
+
+        self.btn_cancel = ttk.Button(btn_row, text="Abbrechen",
+                                      style="Cancel.TButton",
+                                      command=self._on_cancel)
+        # initial versteckt – wird nur während Verbindungsaufbau angezeigt
 
         self.btn_browser = ttk.Button(btn_row, text="Im Browser oeffnen",
                                        style="Action.TButton",
@@ -912,11 +991,19 @@ class VPNApp:
             return
         _, path = self.configs[sel[0]]
         self.btn_connect.configure(state="disabled")
+        self.btn_cancel.pack(side="left", padx=(8, 0))  # Abbrechen zeigen
         self._set_status("Verbinde...", C["yellow"])
 
         def work():
             global _active_config
             r = connect_vpn(path)
+            if _cancel_event.is_set():
+                # Abgebrochen – aufräumen falls nötig
+                if r:
+                    disconnect_vpn(r)
+                self.root.after(0, self._disconnected)
+                self.root.after(0, lambda: self.btn_cancel.pack_forget())
+                return
             if r:
                 self.active_config = r
                 _active_config = r
@@ -925,7 +1012,15 @@ class VPNApp:
                 self.root.after(0, lambda: self._connected(ok))
             else:
                 self.root.after(0, self._disconnected)
+            self.root.after(0, lambda: self.btn_cancel.pack_forget())
         threading.Thread(target=work, daemon=True).start()
+
+    def _on_cancel(self):
+        """Bricht den Verbindungsaufbau ab."""
+        log("Abbrechen angefordert...")
+        _cancel_event.set()
+        self.btn_cancel.configure(state="disabled", text="Abbreche...")
+        self._set_status("Abbreche...", C["orange"])
 
     def _connected(self, reachable: bool):
         self._set_status("Verbunden", C["green"])
@@ -942,6 +1037,8 @@ class VPNApp:
         self.btn_connect.configure(state="normal")
         self.btn_disconnect.configure(state="disabled")
         self.btn_browser.configure(state="disabled")
+        self.btn_cancel.pack_forget()
+        self.btn_cancel.configure(state="normal", text="Abbrechen")
         self.vpn_connected = False
         self.active_config = None
 
