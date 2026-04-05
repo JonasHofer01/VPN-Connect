@@ -19,7 +19,7 @@ from urllib import request, error
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -247,61 +247,52 @@ def _start_dialog_dismisser():
 
 def _dialog_dismisser_loop():
     """Permanenter Loop: sucht und schließt 'Fehler'-Dialoge."""
-    user32 = ctypes.windll.user32
+    import ctypes.wintypes
 
-    # Win32 API Konstanten
-    GW_CHILD = 5
-    WM_GETTEXT = 0x000D
-    WM_GETTEXTLENGTH = 0x000E
+    user32 = ctypes.windll.user32
+    FindWindowW = user32.FindWindowW
+    FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+    FindWindowW.restype = ctypes.wintypes.HWND
+
+    FindWindowExW = user32.FindWindowExW
+    FindWindowExW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HWND,
+                               ctypes.c_wchar_p, ctypes.c_wchar_p]
+    FindWindowExW.restype = ctypes.wintypes.HWND
+
+    SendMessageW = user32.SendMessageW
+    SendMessageW.argtypes = [ctypes.wintypes.HWND, ctypes.c_uint,
+                              ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+
+    PostMessageW = user32.PostMessageW
+    PostMessageW.argtypes = [ctypes.wintypes.HWND, ctypes.c_uint,
+                              ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+
     BM_CLICK = 0x00F5
     WM_CLOSE = 0x0010
-    DIALOG_CLASS = "#32770"
-
-    EnumWindows = user32.EnumWindows
-    GetWindowTextW = user32.GetWindowTextW
-    GetClassNameW = user32.GetClassNameW
-    FindWindowExW = user32.FindWindowExW
-    SendMessageW = user32.SendMessageW
-    PostMessageW = user32.PostMessageW
-    IsWindowVisible = user32.IsWindowVisible
-
-    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    WM_COMMAND = 0x0111
+    IDOK = 1
 
     while True:
         try:
-            found_windows = []
-
-            def enum_callback(hwnd, _):
-                if not IsWindowVisible(hwnd):
-                    return True
-                # Fenster-Titel lesen
-                buf = ctypes.create_unicode_buffer(256)
-                GetWindowTextW(hwnd, buf, 256)
-                title = buf.value
-                # Klasse lesen
-                cls_buf = ctypes.create_unicode_buffer(256)
-                GetClassNameW(hwnd, cls_buf, 256)
-                cls = cls_buf.value
-
-                if title in ("Fehler", "Error") and cls == DIALOG_CLASS:
-                    found_windows.append(hwnd)
-                return True
-
-            EnumWindows(WNDENUMPROC(enum_callback), 0)
-
-            for hwnd in found_windows:
-                log("Fehler-Dialog erkannt → schließe automatisch.")
-                # Versuche OK-Button zu finden und zu klicken
-                btn = FindWindowExW(hwnd, None, "Button", None)
-                if btn:
-                    SendMessageW(btn, BM_CLICK, 0, 0)
-                else:
-                    # Fallback: WM_CLOSE senden
+            for title in ("Fehler", "Error"):
+                # #32770 = Standard Windows Dialog-Klasse (MessageBox)
+                hwnd = FindWindowW("#32770", title)
+                if not hwnd:
+                    hwnd = FindWindowW(None, title)
+                if hwnd:
+                    log(f"Fehler-Dialog erkannt (hwnd={hwnd}, title='{title}') → schließe.")
+                    # Methode 1: OK-Button finden und klicken
+                    btn = FindWindowExW(hwnd, None, "Button", None)
+                    if btn:
+                        SendMessageW(btn, BM_CLICK, 0, 0)
+                    # Methode 2: WM_COMMAND IDOK senden
+                    PostMessageW(hwnd, WM_COMMAND, IDOK, 0)
+                    # Methode 3: WM_CLOSE
                     PostMessageW(hwnd, WM_CLOSE, 0, 0)
-
-        except Exception:
+                    time.sleep(0.5)
+        except Exception as e:
             pass
-        time.sleep(0.2)
+        time.sleep(0.15)
 
 
 # ── Cancel-Mechanismus ───────────────────────────────────────────────────
@@ -672,6 +663,9 @@ class VPNApp:
 
         # Im Hintergrund nach Updates suchen
         threading.Thread(target=self._check_update_bg, daemon=True).start()
+
+        # Dialog-Dismisser sofort starten (schließt WireGuard-Fehlerdialoge)
+        _start_dialog_dismisser()
 
     # ── Styles ────────────────────────────────────────────────────────────
 
