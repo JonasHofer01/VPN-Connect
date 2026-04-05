@@ -19,7 +19,7 @@ from urllib import request, error
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -1189,9 +1189,9 @@ class VPNApp:
     def _on_rdp(self, ip: str, name: str):
         log(f"RDP -> '{name}' ({ip})")
         try:
-            subprocess.Popen(["mstsc.exe", f"/v:{ip}"],
-                             startupinfo=STARTUPINFO,
-                             creationflags=CREATE_NO_WINDOW)
+            # mstsc.exe ist eine GUI-App → KEINE versteckten Flags verwenden
+            # (CREATE_NO_WINDOW / SW_HIDE lassen mstsc abstürzen)
+            subprocess.Popen(["mstsc.exe", f"/v:{ip}"])
         except Exception as e:
             log(f"RDP Fehler: {e}", "error")
 
