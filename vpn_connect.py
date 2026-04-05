@@ -19,7 +19,7 @@ from urllib import request, error
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -1189,9 +1189,17 @@ class VPNApp:
     def _on_rdp(self, ip: str, name: str):
         log(f"RDP -> '{name}' ({ip})")
         try:
-            # mstsc.exe ist eine GUI-App → KEINE versteckten Flags verwenden
-            # (CREATE_NO_WINDOW / SW_HIDE lassen mstsc abstürzen)
-            subprocess.Popen(["mstsc.exe", f"/v:{ip}"])
+            # .rdp-Datei erstellen und über explorer.exe öffnen.
+            # explorer.exe läuft IMMER als normaler Benutzer (de-eleviert).
+            # mstsc.exe direkt als Admin gestartet kann das Bild nicht rendern.
+            rdp_path = os.path.join(
+                os.environ.get("TEMP", _base_dir), f"_vpn_{name}.rdp")
+            with open(rdp_path, "w") as f:
+                f.write(f"full address:s:{ip}\n")
+                f.write("prompt for credentials:i:1\n")
+                f.write("authentication level:i:0\n")
+            subprocess.Popen(["explorer.exe", rdp_path])
+            log(f"RDP-Datei geöffnet: {rdp_path}")
         except Exception as e:
             log(f"RDP Fehler: {e}", "error")
 
