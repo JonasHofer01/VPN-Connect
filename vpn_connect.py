@@ -1,6 +1,5 @@
 import subprocess
 import time
-import webbrowser
 import socket
 import os
 import sys
@@ -19,19 +18,12 @@ from urllib import request, error
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.2.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
 TARGET_IP = "192.168.178.5"
 TARGET_PORT = 8090
-
-BROWSER_PATHS = (
-    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-)
 
 WG_CONFIG_CONTENT = ""
 
@@ -60,6 +52,14 @@ else:
     _base_dir = os.path.dirname(os.path.abspath(__file__))
 
 log_file = os.path.join(_base_dir, "vpn_debug.log")
+
+# Log-Rotation: wenn > 1 MB, alte Datei löschen
+try:
+    if os.path.exists(log_file) and os.path.getsize(log_file) > 1_000_000:
+        os.remove(log_file)
+except OSError:
+    pass
+
 logging.basicConfig(filename=log_file, level=logging.DEBUG,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -206,21 +206,6 @@ def check_connection(ip: str, port: int, timeout: int = 5,
     return False
 
 
-def _find_wireguard_exe() -> str:
-    """Findet den Pfad zu wireguard.exe."""
-    for p in [
-        r"C:\Program Files\WireGuard\wireguard.exe",
-        os.path.join(os.environ.get("ProgramFiles", ""), "WireGuard", "wireguard.exe"),
-    ]:
-        if os.path.isfile(p):
-            return p
-    import shutil
-    found = shutil.which("wireguard")
-    if found:
-        return found
-    return r"C:\Program Files\WireGuard\wireguard.exe"
-
-
 def _wait_service_gone(tn: str, timeout: int = 15) -> bool:
     """Wartet bis der Dienst komplett entfernt ist."""
     for _ in range(timeout):
@@ -246,53 +231,103 @@ def _start_dialog_dismisser():
 
 
 def _dialog_dismisser_loop():
-    """Permanenter Loop: sucht und schließt 'Fehler'-Dialoge."""
-    import ctypes.wintypes
+    """Permanenter Loop: findet und schließt WireGuard-Fehler-Dialoge via EnumWindows."""
+    import ctypes.wintypes as wt
 
-    user32 = ctypes.windll.user32
-    FindWindowW = user32.FindWindowW
-    FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
-    FindWindowW.restype = ctypes.wintypes.HWND
+    user32   = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
 
-    FindWindowExW = user32.FindWindowExW
-    FindWindowExW.argtypes = [ctypes.wintypes.HWND, ctypes.wintypes.HWND,
-                               ctypes.c_wchar_p, ctypes.c_wchar_p]
-    FindWindowExW.restype = ctypes.wintypes.HWND
+    # --- API-Signaturen setzen ---
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
 
-    SendMessageW = user32.SendMessageW
-    SendMessageW.argtypes = [ctypes.wintypes.HWND, ctypes.c_uint,
-                              ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+    user32.EnumWindows.argtypes         = [WNDENUMPROC, wt.LPARAM]
+    user32.GetWindowTextW.argtypes      = [wt.HWND, ctypes.c_wchar_p, ctypes.c_int]
+    user32.GetClassNameW.argtypes       = [wt.HWND, ctypes.c_wchar_p, ctypes.c_int]
+    user32.IsWindowVisible.argtypes     = [wt.HWND]
+    user32.IsWindowVisible.restype      = wt.BOOL
+    user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+    user32.GetWindowThreadProcessId.restype  = wt.DWORD
+    user32.FindWindowExW.argtypes       = [wt.HWND, wt.HWND, ctypes.c_wchar_p, ctypes.c_wchar_p]
+    user32.FindWindowExW.restype        = wt.HWND
+    user32.SendMessageW.argtypes        = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+    user32.PostMessageW.argtypes        = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+    kernel32.OpenProcess.argtypes       = [wt.DWORD, wt.BOOL, wt.DWORD]
+    kernel32.OpenProcess.restype        = wt.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wt.HANDLE, wt.DWORD, ctypes.c_wchar_p, ctypes.POINTER(wt.DWORD)]
+    kernel32.QueryFullProcessImageNameW.restype  = wt.BOOL
+    kernel32.CloseHandle.argtypes       = [wt.HANDLE]
 
-    PostMessageW = user32.PostMessageW
-    PostMessageW.argtypes = [ctypes.wintypes.HWND, ctypes.c_uint,
-                              ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+    PROCESS_QUERY_LIMITED = 0x1000
+    BM_CLICK    = 0x00F5
+    WM_CLOSE    = 0x0010
+    WM_COMMAND  = 0x0111
+    IDOK        = 1
 
-    BM_CLICK = 0x00F5
-    WM_CLOSE = 0x0010
-    WM_COMMAND = 0x0111
-    IDOK = 1
+    # Alle Titel die WireGuard-Fehler-Dialoge tragen können
+    BAD_TITLES  = {"Fehler", "Error", "WireGuard", "Tunnel Error"}
+
+    def _get_proc_name(hwnd: int) -> str:
+        pid = wt.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED, False, pid.value)
+        if not h:
+            return ""
+        buf   = ctypes.create_unicode_buffer(512)
+        size  = wt.DWORD(512)
+        kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+        kernel32.CloseHandle(h)
+        return os.path.basename(buf.value).lower()
+
+    def _close_hwnd(hwnd: int):
+        # Methode 1: OK-Button direkt klicken
+        btn = user32.FindWindowExW(hwnd, None, "Button", None)
+        if btn:
+            user32.SendMessageW(btn, BM_CLICK, 0, 0)
+        # Methode 2: WM_COMMAND IDOK
+        user32.PostMessageW(hwnd, WM_COMMAND, IDOK, 0)
+        # Methode 3: WM_CLOSE
+        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
 
     while True:
         try:
-            for title in ("Fehler", "Error"):
-                # #32770 = Standard Windows Dialog-Klasse (MessageBox)
-                hwnd = FindWindowW("#32770", title)
-                if not hwnd:
-                    hwnd = FindWindowW(None, title)
-                if hwnd:
-                    log(f"Fehler-Dialog erkannt (hwnd={hwnd}, title='{title}') → schließe.")
-                    # Methode 1: OK-Button finden und klicken
-                    btn = FindWindowExW(hwnd, None, "Button", None)
-                    if btn:
-                        SendMessageW(btn, BM_CLICK, 0, 0)
-                    # Methode 2: WM_COMMAND IDOK senden
-                    PostMessageW(hwnd, WM_COMMAND, IDOK, 0)
-                    # Methode 3: WM_CLOSE
-                    PostMessageW(hwnd, WM_CLOSE, 0, 0)
-                    time.sleep(0.5)
-        except Exception as e:
+            found: list[int] = []
+
+            @WNDENUMPROC
+            def _cb(hwnd, _):
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                title_buf = ctypes.create_unicode_buffer(256)
+                user32.GetWindowTextW(hwnd, title_buf, 256)
+                title = title_buf.value
+
+                cls_buf = ctypes.create_unicode_buffer(64)
+                user32.GetClassNameW(hwnd, cls_buf, 64)
+                cls = cls_buf.value
+
+                # Dialog-Klasse (#32770) gehört WireGuard
+                if cls == "#32770" and _get_proc_name(hwnd) == "wireguard.exe":
+                    found.append(hwnd)
+                    return True
+                # Fallback: bekannte Titel
+                if title in BAD_TITLES and cls in ("#32770", "TaskManagerWindow"):
+                    found.append(hwnd)
+                return True
+
+            user32.EnumWindows(_cb, 0)
+
+            for hwnd in found:
+                title_buf = ctypes.create_unicode_buffer(256)
+                user32.GetWindowTextW(hwnd, title_buf, 256)
+                log(f"WireGuard-Dialog geschlossen: '{title_buf.value}'")
+                _close_hwnd(hwnd)
+                time.sleep(0.3)
+
+        except Exception:
             pass
-        time.sleep(0.15)
+        time.sleep(0.2)
 
 
 # ── Cancel-Mechanismus ───────────────────────────────────────────────────
@@ -348,9 +383,12 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
         _run_silent(["wireguard", "/installtunnelservice", config_path],
                     check=True, capture_output=True)
         _we_installed_tunnel = True
-        wait_for_tunnel(tn)
-        log("Tunnel aktiviert.")
-        return config_path
+        if wait_for_tunnel(tn):
+            log("Tunnel aktiviert.")
+            return config_path
+        else:
+            log("Tunnel konnte nicht aktiviert werden.", "warning")
+            return config_path  # trotzdem zurückgeben, Verbindung kann klappen
     except subprocess.CalledProcessError as e:
         log(f"Aktivierung fehlgeschlagen (rc={e.returncode}).", "error")
     except FileNotFoundError:
@@ -465,11 +503,28 @@ class UpSnapClient:
 _active_config: Optional[str] = None
 
 
+def _cleanup_temp_rdp():
+    """Löscht alle temporären _vpn_*.rdp Dateien."""
+    temp = os.environ.get("TEMP", "")
+    if not temp:
+        return
+    try:
+        for f in os.listdir(temp):
+            if f.startswith("_vpn_") and f.endswith(".rdp"):
+                try:
+                    os.remove(os.path.join(temp, f))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 def _cleanup():
     global _active_config
     if _active_config:
         disconnect_vpn(_active_config)
         _active_config = None
+    _cleanup_temp_rdp()
 
 
 def _sig(s, _):
@@ -656,10 +711,12 @@ class VPNApp:
         self.upsnap: Optional[UpSnapClient] = None
         self._device_widgets: List[tk.Widget] = []
         self._log_visible = False
+        self._auto_refresh_id = None   # after()-ID für Auto-Refresh
 
         self._setup_styles()
         self._build_ui()
         self._load_configs()
+        self._load_credentials()   # gespeicherte Credentials laden
 
         # Im Hintergrund nach Updates suchen
         threading.Thread(target=self._check_update_bg, daemon=True).start()
@@ -840,6 +897,9 @@ class VPNApp:
                                      style="Login.TButton",
                                      command=self._on_upsnap_login)
         self.btn_login.pack(side="left")
+        # Enter-Taste → Anmelden
+        self.entry_pass.bind("<Return>", lambda _: self._on_upsnap_login())
+        self.entry_user.bind("<Return>", lambda _: self.entry_pass.focus())
 
         self.btn_refresh_devices = ttk.Button(login_row, text="Aktualisieren",
                                                style="Small.TButton",
@@ -902,6 +962,10 @@ class VPNApp:
         def _do():
             self.log_text.configure(state="normal")
             self.log_text.insert("end", f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+            # Max 500 Zeilen behalten
+            line_count = int(self.log_text.index("end-1c").split(".")[0])
+            if line_count > 500:
+                self.log_text.delete("1.0", f"{line_count - 500}.0")
             self.log_text.see("end")
             self.log_text.configure(state="disabled")
         self.root.after(0, _do)
@@ -1074,10 +1138,56 @@ class VPNApp:
 
         # Methode 3: webbrowser-Modul als letzter Fallback
         try:
+            import webbrowser
             webbrowser.open(url)
             log("Browser geöffnet (webbrowser).")
         except Exception as e:
             log(f"Browser-Fehler: {e}", "error")
+
+    # ── Credentials (speichern/laden) ─────────────────────────────────────
+
+    _CRED_FILE = os.path.join(_base_dir, "vpn_settings.json")
+
+    def _save_credentials(self, user: str, pw: str):
+        try:
+            with open(self._CRED_FILE, "w", encoding="utf-8") as f:
+                json.dump({"user": user, "pw": pw}, f)
+        except OSError:
+            pass
+
+    def _load_credentials(self):
+        try:
+            if os.path.exists(self._CRED_FILE):
+                with open(self._CRED_FILE, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                self.entry_user.insert(0, d.get("user", ""))
+                self.entry_pass.insert(0, d.get("pw", ""))
+        except Exception:
+            pass
+
+    # ── Auto-Refresh ──────────────────────────────────────────────────────
+
+    def _start_auto_refresh(self):
+        """Startet automatisches Aktualisieren der Geräteliste alle 30s."""
+        self._stop_auto_refresh()
+        self._auto_refresh_id = self.root.after(30_000, self._auto_refresh_tick)
+
+    def _stop_auto_refresh(self):
+        if self._auto_refresh_id:
+            self.root.after_cancel(self._auto_refresh_id)
+            self._auto_refresh_id = None
+
+    def _auto_refresh_tick(self):
+        if self.upsnap and self.vpn_connected:
+            def work():
+                try:
+                    devs = self.upsnap.get_devices()
+                    self.root.after(0, lambda: self._show_devices(devs))
+                except Exception:
+                    pass
+            threading.Thread(target=work, daemon=True).start()
+        # Nächster Tick in 30s
+        self._auto_refresh_id = self.root.after(30_000, self._auto_refresh_tick)
 
     # ── UpSnap Login ──────────────────────────────────────────────────────
 
@@ -1090,13 +1200,20 @@ class VPNApp:
         self.btn_login.configure(state="disabled")
 
         def work():
-            c = UpSnapClient(f"http://{TARGET_IP}:{TARGET_PORT}", u, p)
-            if c.token:
-                self.upsnap = c
-                devs = c.get_devices()
-                self.root.after(0, lambda: self._show_devices(devs))
-                self.root.after(0, lambda: self.btn_refresh_devices.configure(state="normal"))
-            else:
+            try:
+                c = UpSnapClient(f"http://{TARGET_IP}:{TARGET_PORT}", u, p)
+                if c.token:
+                    self.upsnap = c
+                    devs = c.get_devices()
+                    self.root.after(0, lambda: self._show_devices(devs))
+                    self.root.after(0, lambda: self.btn_refresh_devices.configure(state="normal"))
+                    # Credentials speichern und Auto-Refresh starten
+                    self.root.after(0, lambda: self._save_credentials(u, p))
+                    self.root.after(0, self._start_auto_refresh)
+                else:
+                    self.root.after(0, lambda: self.btn_login.configure(state="normal"))
+            except Exception as e:
+                log(f"UpSnap Login Fehler: {e}", "error")
                 self.root.after(0, lambda: self.btn_login.configure(state="normal"))
         threading.Thread(target=work, daemon=True).start()
 
@@ -1108,7 +1225,11 @@ class VPNApp:
         log("Geräteliste wird aktualisiert...")
 
         def work():
-            devs = self.upsnap.get_devices()
+            try:
+                devs = self.upsnap.get_devices()
+            except Exception as e:
+                log(f"Geräteliste Fehler: {e}", "error")
+                devs = []
             self.root.after(0, lambda: self._show_devices(devs))
             self.root.after(0, lambda: self.btn_refresh_devices.configure(state="normal"))
         threading.Thread(target=work, daemon=True).start()
@@ -1304,12 +1425,17 @@ class VPNApp:
             self.root.after(0, lambda: self._set_device_status(
                 status_lbl, "Timeout", C["red"]))
             self.root.after(0, lambda: self._set_btns(btn_refs, "normal"))
-            if messagebox.askyesno("Timeout",
-                                    f"'{name}' antwortet nicht.\nRDP trotzdem starten?"):
-                self.root.after(0, lambda: self._on_rdp(
-                    ip, name, btn_refs, status_lbl))
+            # messagebox muss im main thread laufen
+            self.root.after(0, lambda: self._ask_rdp_anyway(
+                ip, name, btn_refs, status_lbl))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _ask_rdp_anyway(self, ip, name, btn_refs, status_lbl):
+        """Fragt ob RDP trotzdem gestartet werden soll (im main thread)."""
+        if messagebox.askyesno("Timeout",
+                                f"'{name}' antwortet nicht.\nRDP trotzdem starten?"):
+            self._on_rdp(ip, name, btn_refs, status_lbl)
 
 
 
@@ -1340,6 +1466,8 @@ def main():
             disconnect_vpn(_app.active_config)
         _active_config = None
         _app.active_config = None
+        _app._stop_auto_refresh()
+        _cleanup_temp_rdp()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
