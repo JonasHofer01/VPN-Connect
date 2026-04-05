@@ -201,6 +201,30 @@ def check_connection(ip: str, port: int, timeout: int = 5,
     return False
 
 
+def _find_wireguard_exe() -> str:
+    """Findet den Pfad zu wireguard.exe."""
+    for p in [
+        r"C:\Program Files\WireGuard\wireguard.exe",
+        os.path.join(os.environ.get("ProgramFiles", ""), "WireGuard", "wireguard.exe"),
+    ]:
+        if os.path.isfile(p):
+            return p
+    import shutil
+    found = shutil.which("wireguard")
+    if found:
+        return found
+    return r"C:\Program Files\WireGuard\wireguard.exe"
+
+
+def _wait_service_gone(tn: str, timeout: int = 15) -> bool:
+    """Wartet bis der Dienst komplett entfernt ist."""
+    for _ in range(timeout):
+        if not _service_state(tn):
+            return True
+        time.sleep(1)
+    return not _service_state(tn)
+
+
 def connect_vpn(config_path: Optional[str]) -> Optional[str]:
     global _we_installed_tunnel
     _we_installed_tunnel = False
@@ -211,6 +235,7 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
 
     tn = extract_tunnel_name(config_path)
     sn = f"WireGuardTunnel${tn}"
+    wg_exe = _find_wireguard_exe()
     log(f"Tunnel: {tn}")
 
     # Bereits laufend?
@@ -219,31 +244,59 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
         _we_installed_tunnel = False
         return config_path
 
-    # Dienst existiert aber gestoppt → erstmal aufräumen, dann sauber installieren
+    # Alten Dienst aufräumen (Reste vom letzten Mal)
     state = _service_state(tn)
-    if state in ("STOPPED", "UNKNOWN"):
+    if state:
         log(f"Raeume alten Dienst auf: {sn} (state={state})")
-        try:
-            _run_silent(["sc", "delete", sn],
+        if state == "RUNNING":
+            _run_silent(["sc.exe", "stop", sn],
                         capture_output=True, text=True, timeout=10)
             time.sleep(2)
-        except Exception:
-            pass
+        _run_silent(["sc.exe", "delete", sn],
+                    capture_output=True, text=True, timeout=10)
+        _wait_service_gone(tn)
 
-    # Neu installieren
+    # Dienst erstellen mit sc.exe (Konsolen-App → KEINE GUI-Dialoge!)
+    bin_path = f'"{wg_exe}" /tunnelservice "{config_path}"'
+    log(f"Erstelle Dienst: {sn}")
     try:
-        log(f"Installiere Tunnel: {config_path}")
-        _run_silent(["wireguard", "/installtunnelservice", config_path],
-                    check=True, capture_output=True)
-        _we_installed_tunnel = True
-        wait_for_tunnel(tn)
+        r = _run_silent(
+            ["sc.exe", "create", sn,
+             f"binPath=", bin_path,
+             "type=", "own",
+             "start=", "demand",
+             f"displayname=", f"WireGuard Tunnel: {tn}"],
+            capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            log(f"sc create fehlgeschlagen (rc={r.returncode}): {r.stderr}", "error")
+            return None
+        log("Dienst erstellt.")
+    except Exception as e:
+        log(f"sc create Fehler: {e}", "error")
+        return None
+
+    # Dienst starten
+    try:
+        r = _run_silent(["sc.exe", "start", sn],
+                        capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            log(f"sc start fehlgeschlagen (rc={r.returncode}): {r.stderr}", "error")
+            _run_silent(["sc.exe", "delete", sn],
+                        capture_output=True, text=True, timeout=5)
+            return None
+    except Exception as e:
+        log(f"sc start Fehler: {e}", "error")
+        _run_silent(["sc.exe", "delete", sn],
+                    capture_output=True, text=True, timeout=5)
+        return None
+
+    _we_installed_tunnel = True
+    if wait_for_tunnel(tn):
         log("Tunnel aktiviert.")
         return config_path
-    except subprocess.CalledProcessError as e:
-        log(f"Aktivierung fehlgeschlagen (rc={e.returncode}).", "error")
-    except FileNotFoundError:
-        log("WireGuard nicht gefunden.", "error")
-    return None
+
+    log("Tunnel konnte nicht aktiviert werden.", "error")
+    return config_path
 
 
 def disconnect_vpn(config_path: str) -> None:
@@ -259,42 +312,32 @@ def disconnect_vpn(config_path: str) -> None:
         _we_installed_tunnel = False
         return
 
-    # Dienst stoppen
+    # Dienst stoppen (sc.exe = Konsolen-App → KEINE GUI-Dialoge)
     if state == "RUNNING":
         log(f"Stoppe Tunnel: {tn}")
         try:
-            _run_silent(["sc", "stop", sn],
+            _run_silent(["sc.exe", "stop", sn],
                         capture_output=True, text=True, timeout=15)
             for _ in range(10):
                 time.sleep(1)
-                st = _service_state(tn)
-                if st != "RUNNING":
+                if _service_state(tn) != "RUNNING":
                     break
             log("Tunnel gestoppt.")
         except Exception as e:
             log(f"Stopp Fehler: {e}", "warning")
 
-    # Dienst IMMER löschen wenn WIR ihn installiert haben
-    # (verhindert verwaiste Services die beim nächsten Connect Fehler-Dialoge verursachen)
+    # Dienst löschen wenn WIR ihn erstellt haben
     if _we_installed_tunnel:
-        for attempt in range(3):
-            st = _service_state(tn)
-            if not st:
-                log("Tunnel-Dienst bereits entfernt.")
-                break
-            log(f"Entferne Tunnel-Dienst: {tn} (Versuch {attempt + 1})")
-            try:
-                r = _run_silent(["sc", "delete", sn],
-                                capture_output=True, text=True, timeout=15)
-                if r.returncode == 0:
-                    log("Tunnel-Dienst entfernt.")
-                    break
-                else:
-                    log(f"sc delete rc={r.returncode}, warte...", "warning")
-                    time.sleep(2)
-            except Exception as e:
-                log(f"Entfernen Fehler: {e}", "warning")
-                time.sleep(2)
+        log(f"Entferne Tunnel-Dienst: {tn}")
+        try:
+            _run_silent(["sc.exe", "delete", sn],
+                        capture_output=True, text=True, timeout=15)
+            if _wait_service_gone(tn, timeout=10):
+                log("Tunnel-Dienst entfernt.")
+            else:
+                log("Dienst konnte nicht vollständig entfernt werden.", "warning")
+        except Exception as e:
+            log(f"Entfernen Fehler: {e}", "warning")
 
     _we_installed_tunnel = False
 
