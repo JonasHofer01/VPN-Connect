@@ -225,6 +225,26 @@ def _wait_service_gone(tn: str, timeout: int = 15) -> bool:
     return not _service_state(tn)
 
 
+def _dismiss_error_dialogs(duration: int = 10):
+    """Hintergrund-Thread: schließt automatisch alle 'Fehler'-Dialoge
+    die von wireguard.exe erzeugt werden (MessageBox).
+    Läuft 'duration' Sekunden lang."""
+    user32 = ctypes.windll.user32
+    WM_CLOSE = 0x0010
+    end = time.time() + duration
+    while time.time() < end:
+        try:
+            # Suche nach Fenstern mit Titel "Fehler" (deutscher Windows MessageBox-Titel)
+            for title in ("Fehler", "Error"):
+                hwnd = user32.FindWindowW(None, title)
+                if hwnd:
+                    user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                    log(f"Fehler-Dialog automatisch geschlossen.", "info")
+        except Exception:
+            pass
+        time.sleep(0.3)
+
+
 def connect_vpn(config_path: Optional[str]) -> Optional[str]:
     global _we_installed_tunnel
     _we_installed_tunnel = False
@@ -235,7 +255,6 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
 
     tn = extract_tunnel_name(config_path)
     sn = f"WireGuardTunnel${tn}"
-    wg_exe = _find_wireguard_exe()
     log(f"Tunnel: {tn}")
 
     # Bereits laufend?
@@ -256,47 +275,23 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
                     capture_output=True, text=True, timeout=10)
         _wait_service_gone(tn)
 
-    # Dienst erstellen mit sc.exe (Konsolen-App → KEINE GUI-Dialoge!)
-    bin_path = f'"{wg_exe}" /tunnelservice "{config_path}"'
-    log(f"Erstelle Dienst: {sn}")
-    try:
-        r = _run_silent(
-            ["sc.exe", "create", sn,
-             f"binPath=", bin_path,
-             "type=", "own",
-             "start=", "demand",
-             f"displayname=", f"WireGuard Tunnel: {tn}"],
-            capture_output=True, text=True, timeout=15)
-        if r.returncode != 0:
-            log(f"sc create fehlgeschlagen (rc={r.returncode}): {r.stderr}", "error")
-            return None
-        log("Dienst erstellt.")
-    except Exception as e:
-        log(f"sc create Fehler: {e}", "error")
-        return None
+    # Dialog-Schließer starten (schließt automatisch "Fehler"-Dialoge)
+    threading.Thread(target=_dismiss_error_dialogs, args=(15,), daemon=True).start()
 
-    # Dienst starten
+    # Tunnel installieren via WireGuard (funktioniert nur über den Manager)
     try:
-        r = _run_silent(["sc.exe", "start", sn],
-                        capture_output=True, text=True, timeout=15)
-        if r.returncode != 0:
-            log(f"sc start fehlgeschlagen (rc={r.returncode}): {r.stderr}", "error")
-            _run_silent(["sc.exe", "delete", sn],
-                        capture_output=True, text=True, timeout=5)
-            return None
-    except Exception as e:
-        log(f"sc start Fehler: {e}", "error")
-        _run_silent(["sc.exe", "delete", sn],
-                    capture_output=True, text=True, timeout=5)
-        return None
-
-    _we_installed_tunnel = True
-    if wait_for_tunnel(tn):
+        log(f"Installiere Tunnel: {config_path}")
+        _run_silent(["wireguard", "/installtunnelservice", config_path],
+                    check=True, capture_output=True)
+        _we_installed_tunnel = True
+        wait_for_tunnel(tn)
         log("Tunnel aktiviert.")
         return config_path
-
-    log("Tunnel konnte nicht aktiviert werden.", "error")
-    return config_path
+    except subprocess.CalledProcessError as e:
+        log(f"Aktivierung fehlgeschlagen (rc={e.returncode}).", "error")
+    except FileNotFoundError:
+        log("WireGuard nicht gefunden.", "error")
+    return None
 
 
 def disconnect_vpn(config_path: str) -> None:
@@ -312,7 +307,10 @@ def disconnect_vpn(config_path: str) -> None:
         _we_installed_tunnel = False
         return
 
-    # Dienst stoppen (sc.exe = Konsolen-App → KEINE GUI-Dialoge)
+    # Dialog-Schließer starten
+    threading.Thread(target=_dismiss_error_dialogs, args=(10,), daemon=True).start()
+
+    # Dienst stoppen (sc.exe = Konsolen-App → zeigt selbst keine GUI-Dialoge)
     if state == "RUNNING":
         log(f"Stoppe Tunnel: {tn}")
         try:
