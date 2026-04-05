@@ -9,10 +9,16 @@ import atexit
 import json
 import logging
 import threading
-import tkinter as tk
-from tkinter import ttk, messagebox
 from typing import Optional, List, Tuple
 from urllib import request, error
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QLineEdit, QListWidget, QFrame,
+    QScrollArea, QTextEdit, QMessageBox,
+)
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt6.QtGui import QFont, QColor, QPainter
 
 # =============================================================================
 #  KONFIGURATION
@@ -44,8 +50,6 @@ STARTUPINFO.wShowWindow = SW_HIDE
 #  LOGGING
 # =============================================================================
 
-# Im PyInstaller-Onefile-Modus liegt __file__ in einem Temp-Verzeichnis,
-# daher das Log neben die .exe / das Script legen.
 if getattr(sys, 'frozen', False):
     _base_dir = os.path.dirname(sys.executable)
 else:
@@ -53,7 +57,6 @@ else:
 
 log_file = os.path.join(_base_dir, "vpn_debug.log")
 
-# Log-Rotation: wenn > 1 MB, alte Datei löschen
 try:
     if os.path.exists(log_file) and os.path.getsize(log_file) > 1_000_000:
         os.remove(log_file)
@@ -69,7 +72,7 @@ _app: Optional["VPNApp"] = None
 def log(msg: str, level: str = "info") -> None:
     getattr(logging, level, logging.info)(msg)
     if _app:
-        _app.append_log(msg)
+        _app.sig.log_signal.emit(msg)
 
 
 # =============================================================================
@@ -109,7 +112,6 @@ def extract_tunnel_name(config_path: str) -> str:
 #  WIREGUARD
 # =============================================================================
 
-# Trackt ob WIR den Tunnel installiert haben (vs. bereits laufend)
 _we_installed_tunnel = False
 
 
@@ -138,7 +140,6 @@ def collect_all_configs() -> List[Tuple[str, str]]:
 
 
 def _service_state(tunnel_name: str) -> str:
-    """Gibt 'RUNNING', 'STOPPED', oder '' zurück."""
     sn = f"WireGuardTunnel${tunnel_name}"
     try:
         r = _run_silent(["sc", "query", sn],
@@ -207,7 +208,6 @@ def check_connection(ip: str, port: int, timeout: int = 5,
 
 
 def _wait_service_gone(tn: str, timeout: int = 15) -> bool:
-    """Wartet bis der Dienst komplett entfernt ist."""
     for _ in range(timeout):
         if not _service_state(tn):
             return True
@@ -221,8 +221,6 @@ _dismiss_running = False
 
 
 def _start_dialog_dismisser():
-    """Startet einen permanenten Hintergrund-Thread der WireGuard-Fehler-Dialoge
-    automatisch schließt, solange die App läuft."""
     global _dismiss_running
     if _dismiss_running:
         return
@@ -231,13 +229,11 @@ def _start_dialog_dismisser():
 
 
 def _dialog_dismisser_loop():
-    """Permanenter Loop: findet und schließt WireGuard-Fehler-Dialoge via EnumWindows."""
     import ctypes.wintypes as wt
 
     user32   = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
 
-    # --- API-Signaturen setzen ---
     WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
 
     user32.EnumWindows.argtypes         = [WNDENUMPROC, wt.LPARAM]
@@ -264,7 +260,6 @@ def _dialog_dismisser_loop():
     WM_COMMAND  = 0x0111
     IDOK        = 1
 
-    # Alle Titel die WireGuard-Fehler-Dialoge tragen können
     BAD_TITLES  = {"Fehler", "Error", "WireGuard", "Tunnel Error"}
 
     def _get_proc_name(hwnd: int) -> str:
@@ -282,13 +277,10 @@ def _dialog_dismisser_loop():
         return os.path.basename(buf.value).lower()
 
     def _close_hwnd(hwnd: int):
-        # Methode 1: OK-Button direkt klicken
         btn = user32.FindWindowExW(hwnd, None, "Button", None)
         if btn:
             user32.SendMessageW(btn, BM_CLICK, 0, 0)
-        # Methode 2: WM_COMMAND IDOK
         user32.PostMessageW(hwnd, WM_COMMAND, IDOK, 0)
-        # Methode 3: WM_CLOSE
         user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
 
     while True:
@@ -307,11 +299,9 @@ def _dialog_dismisser_loop():
                 user32.GetClassNameW(hwnd, cls_buf, 64)
                 cls = cls_buf.value
 
-                # Dialog-Klasse (#32770) gehört WireGuard
                 if cls == "#32770" and _get_proc_name(hwnd) == "wireguard.exe":
                     found.append(hwnd)
                     return True
-                # Fallback: bekannte Titel
                 if title in BAD_TITLES and cls in ("#32770", "TaskManagerWindow"):
                     found.append(hwnd)
                 return True
@@ -348,10 +338,8 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
     sn = f"WireGuardTunnel${tn}"
     log(f"Tunnel: {tn}")
 
-    # Dialog-Schließer sicherstellen
     _start_dialog_dismisser()
 
-    # Bereits laufend?
     if _service_state(tn) == "RUNNING":
         log(f"'{sn}' laeuft bereits.")
         _we_installed_tunnel = False
@@ -361,7 +349,6 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
         log("Verbindung abgebrochen.", "warning")
         return None
 
-    # Alten Dienst aufräumen (Reste vom letzten Mal)
     state = _service_state(tn)
     if state:
         log(f"Raeume alten Dienst auf: {sn} (state={state})")
@@ -377,7 +364,6 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
         log("Verbindung abgebrochen.", "warning")
         return None
 
-    # Tunnel installieren via WireGuard Manager
     try:
         log(f"Installiere Tunnel: {config_path}")
         _run_silent(["wireguard", "/installtunnelservice", config_path],
@@ -388,7 +374,7 @@ def connect_vpn(config_path: Optional[str]) -> Optional[str]:
             return config_path
         else:
             log("Tunnel konnte nicht aktiviert werden.", "warning")
-            return config_path  # trotzdem zurückgeben, Verbindung kann klappen
+            return config_path
     except subprocess.CalledProcessError as e:
         log(f"Aktivierung fehlgeschlagen (rc={e.returncode}).", "error")
     except FileNotFoundError:
@@ -403,7 +389,6 @@ def disconnect_vpn(config_path: str) -> None:
     tn = extract_tunnel_name(config_path)
     sn = f"WireGuardTunnel${tn}"
 
-    # Dialog-Schließer sicherstellen
     _start_dialog_dismisser()
 
     state = _service_state(tn)
@@ -412,7 +397,6 @@ def disconnect_vpn(config_path: str) -> None:
         _we_installed_tunnel = False
         return
 
-    # Dienst stoppen (sc.exe = Konsolen-App → zeigt selbst keine GUI-Dialoge)
     if state == "RUNNING":
         log(f"Stoppe Tunnel: {tn}")
         try:
@@ -426,7 +410,6 @@ def disconnect_vpn(config_path: str) -> None:
         except Exception as e:
             log(f"Stopp Fehler: {e}", "warning")
 
-    # Dienst löschen wenn WIR ihn erstellt haben
     if _we_installed_tunnel:
         log(f"Entferne Tunnel-Dienst: {tn}")
         try:
@@ -504,7 +487,6 @@ _active_config: Optional[str] = None
 
 
 def _cleanup_temp_rdp():
-    """Löscht alle temporären _vpn_*.rdp Dateien."""
     temp = os.environ.get("TEMP", "")
     if not temp:
         return
@@ -543,7 +525,6 @@ if hasattr(signal, "SIGBREAK"):
 # =============================================================================
 
 def _parse_version(tag: str) -> tuple:
-    """'v1.2.3' oder '1.2.3' → (1, 2, 3)"""
     tag = tag.lstrip("vV").strip()
     parts = []
     for p in tag.split("."):
@@ -555,8 +536,6 @@ def _parse_version(tag: str) -> tuple:
 
 
 def check_for_update() -> Optional[dict]:
-    """Prüft GitHub Releases auf eine neuere Version.
-    Gibt {tag, url, size} zurück oder None."""
     api = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
     try:
         req = request.Request(api, headers={"Accept": "application/vnd.github+json",
@@ -572,7 +551,6 @@ def check_for_update() -> Optional[dict]:
             log(f"Kein Update (lokal={APP_VERSION}, remote={remote_tag}).")
             return None
 
-        # .exe-Asset finden
         for asset in data.get("assets", []):
             if asset["name"].lower().endswith(".exe"):
                 log(f"Update verfügbar: {remote_tag} (aktuell: {APP_VERSION})")
@@ -589,7 +567,6 @@ def check_for_update() -> Optional[dict]:
 
 
 def download_update(url: str, dest: str, progress_cb=None) -> bool:
-    """Lädt die neue EXE herunter. progress_cb(bytes_done, total)."""
     try:
         req = request.Request(url, headers={"User-Agent": "VPN-Connect-Updater"})
         with request.urlopen(req, timeout=60) as resp:
@@ -608,7 +585,6 @@ def download_update(url: str, dest: str, progress_cb=None) -> bool:
         return True
     except Exception as e:
         log(f"Download fehlgeschlagen: {e}", "error")
-        # Aufräumen
         try:
             os.remove(dest)
         except OSError:
@@ -617,8 +593,6 @@ def download_update(url: str, dest: str, progress_cb=None) -> bool:
 
 
 def apply_update(new_exe: str) -> None:
-    """Benennt die laufende EXE um, verschiebt die neue an deren Stelle
-    und startet neu."""
     if not getattr(sys, 'frozen', False):
         log("Update nur als EXE möglich.", "warning")
         return
@@ -627,26 +601,21 @@ def apply_update(new_exe: str) -> None:
     backup = current + ".old"
 
     try:
-        # Alte Backup-Datei entfernen
         if os.path.exists(backup):
             os.remove(backup)
 
-        # Laufende EXE umbenennen (Windows erlaubt rename, nicht overwrite)
         os.rename(current, backup)
         log(f"Alte EXE umbenannt → {os.path.basename(backup)}")
 
-        # Neue EXE an Original-Pfad verschieben
         os.rename(new_exe, current)
         log("Neue EXE installiert.")
 
-        # Neue EXE starten mit --cleanup Flag
         subprocess.Popen([current, "--cleanup"])
         log("Neustart...")
         sys.exit(0)
 
     except Exception as e:
         log(f"Update-Installation fehlgeschlagen: {e}", "error")
-        # Rollback
         try:
             if not os.path.exists(current) and os.path.exists(backup):
                 os.rename(backup, current)
@@ -656,7 +625,6 @@ def apply_update(new_exe: str) -> None:
 
 
 def _cleanup_old_exe():
-    """Löscht die alte .exe.old nach einem Update-Neustart."""
     if not getattr(sys, 'frozen', False):
         return
     old = sys.executable + ".old"
@@ -691,400 +659,565 @@ C = {
     "cyan":     "#22d3ee",
 }
 
+# =============================================================================
+#  GLOBAL STYLESHEET
+# =============================================================================
+
+GLOBAL_QSS = f"""
+QMainWindow {{
+    background-color: {C['bg']};
+}}
+QWidget {{
+    color: {C['fg']};
+    font-family: 'Segoe UI';
+    font-size: 10pt;
+}}
+QScrollArea {{
+    background-color: {C['bg']};
+    border: none;
+}}
+QScrollBar:vertical {{
+    background: {C['card']};
+    width: 8px;
+    border: none;
+}}
+QScrollBar::handle:vertical {{
+    background: {C['surface']};
+    min-height: 30px;
+    border-radius: 4px;
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0px;
+}}
+QLabel {{
+    background: transparent;
+}}
+QLineEdit {{
+    background-color: {C['surface']};
+    color: {C['fg']};
+    border: 1px solid {C['border']};
+    border-radius: 4px;
+    padding: 5px 8px;
+    font-size: 10pt;
+}}
+QLineEdit:focus {{
+    border: 1px solid {C['accent']};
+}}
+QListWidget {{
+    background-color: {C['surface']};
+    color: {C['fg']};
+    border: none;
+    border-radius: 4px;
+    padding: 4px;
+    font-size: 10pt;
+    outline: none;
+}}
+QListWidget::item {{
+    padding: 4px 8px;
+    border-radius: 3px;
+}}
+QListWidget::item:selected {{
+    background-color: {C['accent']};
+    color: #ffffff;
+}}
+QListWidget::item:hover {{
+    background-color: {C['border']};
+}}
+QTextEdit {{
+    background-color: {C['surface']};
+    color: {C['dim']};
+    border: none;
+    border-radius: 4px;
+    padding: 6px;
+    font-family: 'Consolas';
+    font-size: 9pt;
+}}
+QPushButton {{
+    border: none;
+    border-radius: 4px;
+    padding: 7px 14px;
+    font-weight: bold;
+    font-size: 9pt;
+}}
+QPushButton:disabled {{
+    background-color: {C['surface']};
+    color: {C['dim']};
+}}
+"""
+
+
+# =============================================================================
+#  SIGNALE (thread-safe GUI-Kommunikation)
+# =============================================================================
+
+class AppSignals(QObject):
+    log_signal = pyqtSignal(str)
+    status_signal = pyqtSignal(str, str)           # text, color
+    connected_signal = pyqtSignal(bool)             # reachable
+    disconnected_signal = pyqtSignal()
+    cancel_done_signal = pyqtSignal()
+    show_devices_signal = pyqtSignal(list)
+    enable_refresh_signal = pyqtSignal()
+    enable_login_signal = pyqtSignal()
+    update_available_signal = pyqtSignal(dict)
+    update_progress_signal = pyqtSignal(str)
+    update_failed_signal = pyqtSignal()
+    apply_update_signal = pyqtSignal(str)
+    device_status_signal = pyqtSignal(object, str, str)  # label, text, color
+    btns_state_signal = pyqtSignal(list, bool)            # btn_refs, enabled
+    trigger_rdp_signal = pyqtSignal(str, str, list, object)  # ip, name, btns, lbl
+    ask_rdp_signal = pyqtSignal(str, str, list, object)
+
+
+# =============================================================================
+#  CUSTOM WIDGETS
+# =============================================================================
+
+class DotWidget(QWidget):
+    """Kleiner farbiger Punkt."""
+    def __init__(self, color: str = C["red"], size: int = 12, parent=None):
+        super().__init__(parent)
+        self._color = color
+        self._size = size
+        self.setFixedSize(size, size)
+
+    def set_color(self, color: str):
+        self._color = color
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QColor(self._color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(1, 1, self._size - 2, self._size - 2)
+        p.end()
+
+
+def _make_btn(text: str, bg: str, fg: str, hover: str,
+              parent=None) -> QPushButton:
+    btn = QPushButton(text, parent)
+    btn.setStyleSheet(f"""
+        QPushButton {{
+            background-color: {bg}; color: {fg};
+            border: none; border-radius: 4px;
+            padding: 7px 14px; font-weight: bold; font-size: 9pt;
+        }}
+        QPushButton:hover {{ background-color: {hover}; }}
+        QPushButton:disabled {{
+            background-color: {C['surface']}; color: {C['dim']};
+        }}
+    """)
+    return btn
+
 
 # =============================================================================
 #  GUI
 # =============================================================================
 
-class VPNApp:
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.root.title(f"VPN Connect  v{APP_VERSION}")
-        self.root.configure(bg=C["bg"])
-        self.root.resizable(True, True)
-        self.root.minsize(800, 520)
-        self.root.geometry("800x560")
+class VPNApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f"VPN Connect  v{APP_VERSION}")
+        self.setMinimumSize(800, 520)
+        self.resize(800, 560)
 
         self.configs: List[Tuple[str, str]] = []
         self.active_config: Optional[str] = None
         self.vpn_connected = False
         self.upsnap: Optional[UpSnapClient] = None
-        self._device_widgets: List[tk.Widget] = []
+        self._device_widgets: List[QWidget] = []
         self._log_visible = False
-        self._auto_refresh_id = None   # after()-ID für Auto-Refresh
+        self._update_info: Optional[dict] = None
 
-        self._setup_styles()
+        # Signale
+        self.sig = AppSignals()
+        self._connect_signals()
+
+        # Auto-Refresh Timer
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.setInterval(30_000)
+        self._auto_refresh_timer.timeout.connect(self._auto_refresh_tick)
+
         self._build_ui()
         self._load_configs()
-        self._load_credentials()   # gespeicherte Credentials laden
+        self._load_credentials()
 
-        # Im Hintergrund nach Updates suchen
+        # Update-Check im Hintergrund
         threading.Thread(target=self._check_update_bg, daemon=True).start()
 
-        # Dialog-Dismisser sofort starten (schließt WireGuard-Fehlerdialoge)
+        # Dialog-Dismisser
         _start_dialog_dismisser()
 
-    # ── Styles ────────────────────────────────────────────────────────────
+    # ── Signale verbinden ──────────────────────────────────────────────────
 
-    def _setup_styles(self):
-        s = ttk.Style()
-        s.theme_use("clam")
+    def _connect_signals(self):
+        self.sig.log_signal.connect(self._append_log)
+        self.sig.status_signal.connect(self._set_status)
+        self.sig.connected_signal.connect(self._connected)
+        self.sig.disconnected_signal.connect(self._disconnected)
+        self.sig.cancel_done_signal.connect(lambda: self.btn_cancel.hide())
+        self.sig.show_devices_signal.connect(self._show_devices)
+        self.sig.enable_refresh_signal.connect(
+            lambda: self.btn_refresh_devices.setEnabled(True))
+        self.sig.enable_login_signal.connect(
+            lambda: self.btn_login.setEnabled(True))
+        self.sig.update_available_signal.connect(self._show_update_btn)
+        self.sig.update_progress_signal.connect(
+            lambda t: self.btn_update.setText(t))
+        self.sig.update_failed_signal.connect(self._on_update_failed)
+        self.sig.apply_update_signal.connect(self._apply_update)
+        self.sig.device_status_signal.connect(self._set_device_status_slot)
+        self.sig.btns_state_signal.connect(self._set_btns_slot)
+        self.sig.trigger_rdp_signal.connect(
+            lambda ip, name, bl, sl: self._on_rdp(ip, name, bl, sl))
+        self.sig.ask_rdp_signal.connect(self._ask_rdp_anyway)
 
-        s.configure("TFrame", background=C["bg"])
-        s.configure("Card.TFrame", background=C["card"], relief="flat")
-        s.configure("TLabel", background=C["bg"], foreground=C["fg"],
-                    font=("Segoe UI", 10))
-        s.configure("H1.TLabel", background=C["bg"], foreground=C["fg"],
-                    font=("Segoe UI", 18, "bold"))
-        s.configure("H2.TLabel", background=C["bg"], foreground=C["dim"],
-                    font=("Segoe UI", 10, "bold"))
-        s.configure("Card.TLabel", background=C["card"], foreground=C["fg"],
-                    font=("Segoe UI", 10))
-        s.configure("Dim.TLabel", background=C["card"], foreground=C["dim"],
-                    font=("Segoe UI", 9))
-        s.configure("Status.TLabel", background=C["bg"], font=("Segoe UI", 11, "bold"))
-
-        for name, bg, fg, bg_a in [
-            ("Connect.TButton", C["accent"],  "#ffffff",  C["accent_h"]),
-            ("Disconnect.TButton", C["red"],   "#ffffff",  "#fca5a5"),
-            ("Action.TButton",  C["surface"], C["fg"],    C["border"]),
-            ("Login.TButton",   C["accent"],  "#ffffff",  C["accent_h"]),
-            ("Cancel.TButton",  C["orange"],  "#000000",  C["yellow"]),
-        ]:
-            s.configure(name, background=bg, foreground=fg,
-                        font=("Segoe UI", 9, "bold"), padding=(14, 7),
-                        borderwidth=0)
-            s.map(name,
-                  background=[("active", bg_a), ("disabled", C["surface"])],
-                  foreground=[("disabled", C["dim"])])
-
-        s.configure("Small.TButton", background=C["surface"], foreground=C["fg"],
-                    font=("Segoe UI", 9), padding=(10, 5), borderwidth=0)
-        s.map("Small.TButton",
-              background=[("active", C["border"]), ("disabled", C["bg"])],
-              foreground=[("disabled", C["dim"])])
-
-        s.configure("Toggle.TButton", background=C["bg"], foreground=C["dim"],
-                    font=("Segoe UI", 9), padding=(4, 2), borderwidth=0)
-        s.map("Toggle.TButton", background=[("active", C["bg"])])
-
-        s.configure("Update.TButton", background=C["green"], foreground="#000000",
-                    font=("Segoe UI", 9, "bold"), padding=(10, 5), borderwidth=0)
-        s.map("Update.TButton",
-              background=[("active", "#86efac"), ("disabled", C["surface"])],
-              foreground=[("disabled", C["dim"])])
-
-        s.configure("TEntry", fieldbackground=C["surface"], foreground=C["fg"],
-                    insertcolor=C["fg"], font=("Segoe UI", 10), borderwidth=0)
-
-        s.configure("Vertical.TScrollbar", background=C["surface"],
-                    troughcolor=C["card"], borderwidth=0, arrowsize=0)
-
-    # ── Layout ────────────────────────────────────────────────────────────
+    # ── Layout ─────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         pad = 20
 
-        # ── Scrollbares Hauptfenster ──
-        self._canvas = tk.Canvas(self.root, bg=C["bg"], highlightthickness=0,
-                                  borderwidth=0)
-        vsb = ttk.Scrollbar(self.root, orient="vertical",
-                             command=self._canvas.yview)
-        self._canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y")
-        self._canvas.pack(side="left", fill="both", expand=True)
+        # Zentrales Widget mit Scroll-Bereich
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.setCentralWidget(scroll)
 
-        outer = ttk.Frame(self._canvas)
-        self._outer_id = self._canvas.create_window(
-            (0, 0), window=outer, anchor="nw")
-
-        def _on_frame(e):
-            self._canvas.configure(scrollregion=self._canvas.bbox("all"))
-
-        def _on_canvas(e):
-            self._canvas.itemconfig(self._outer_id, width=e.width)
-
-        def _on_wheel(e):
-            self._canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-
-        outer.bind("<Configure>", _on_frame)
-        self._canvas.bind("<Configure>", _on_canvas)
-        self._canvas.bind_all("<MouseWheel>", _on_wheel)
+        outer = QWidget()
+        outer.setStyleSheet(f"background-color: {C['bg']};")
+        scroll.setWidget(outer)
+        main_layout = QVBoxLayout(outer)
+        main_layout.setContentsMargins(pad, pad, pad, pad)
+        main_layout.setSpacing(0)
 
         # ── Header ──
-        hdr = ttk.Frame(outer)
-        hdr.pack(fill="x", padx=pad, pady=(pad, 16))
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(0, 0, 0, 16)
 
-        ttk.Label(hdr, text="VPN Connect", style="H1.TLabel").pack(side="left")
+        title = QLabel("VPN Connect")
+        title.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C['fg']};")
+        hdr.addWidget(title)
 
         # Update-Button (initial versteckt)
-        self.btn_update = ttk.Button(hdr, text="⬆ Update verfügbar",
-                                      style="Update.TButton",
-                                      command=self._on_update)
-        self._update_info: Optional[dict] = None
+        self.btn_update = _make_btn("⬆ Update verfügbar", C["green"], "#000000", "#86efac")
+        self.btn_update.clicked.connect(self._on_update)
+        self.btn_update.hide()
+        hdr.addWidget(self.btn_update)
 
-        status_box = ttk.Frame(hdr)
-        status_box.pack(side="right")
-        self.status_dot = tk.Canvas(status_box, width=12, height=12,
-                                     bg=C["bg"], highlightthickness=0)
-        self.status_dot.pack(side="left", padx=(0, 6), pady=2)
-        self._draw_dot(C["red"])
-        self.status_label = ttk.Label(status_box, text="Getrennt",
-                                       style="Status.TLabel", foreground=C["red"])
-        self.status_label.pack(side="left")
+        hdr.addStretch()
+
+        # Status
+        status_box = QHBoxLayout()
+        status_box.setSpacing(6)
+        self.status_dot = DotWidget(C["red"])
+        status_box.addWidget(self.status_dot)
+        self.status_label = QLabel("Getrennt")
+        self.status_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self.status_label.setStyleSheet(f"color: {C['red']};")
+        status_box.addWidget(self.status_label)
+        hdr.addLayout(status_box)
+
+        main_layout.addLayout(hdr)
 
         # ── WireGuard Sektion ──
-        ttk.Label(outer, text="WIREGUARD KANAL", style="H2.TLabel").pack(
-            anchor="w", padx=pad, pady=(0, 6))
+        wg_header = QLabel("WIREGUARD KANAL")
+        wg_header.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        wg_header.setStyleSheet(f"color: {C['dim']};")
+        main_layout.addWidget(wg_header)
+        main_layout.addSpacing(6)
 
-        wg = tk.Frame(outer, bg=C["card"], padx=14, pady=14)
-        wg.pack(fill="x", padx=pad, pady=(0, 16))
+        wg_card = QFrame()
+        wg_card.setStyleSheet(f"""
+            QFrame {{ background-color: {C['card']}; border-radius: 8px; }}
+        """)
+        wg_layout = QVBoxLayout(wg_card)
+        wg_layout.setContentsMargins(14, 14, 14, 14)
+        wg_layout.setSpacing(10)
 
-        self.config_listbox = tk.Listbox(
-            wg, height=3, bg=C["surface"], fg=C["fg"],
-            selectbackground=C["accent"], selectforeground="#ffffff",
-            font=("Segoe UI", 10), bd=0, highlightthickness=0,
-            activestyle="none", relief="flat",
-        )
-        self.config_listbox.pack(fill="x", pady=(0, 10))
+        self.config_listbox = QListWidget()
+        self.config_listbox.setMaximumHeight(80)
+        wg_layout.addWidget(self.config_listbox)
 
-        btn_row = tk.Frame(wg, bg=C["card"])
-        btn_row.pack(fill="x")
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
 
-        self.btn_connect = ttk.Button(btn_row, text="Verbinden",
-                                       style="Connect.TButton",
-                                       command=self._on_connect)
-        self.btn_connect.pack(side="left")
+        self.btn_connect = _make_btn("Verbinden", C["accent"], "#ffffff", C["accent_h"])
+        self.btn_connect.clicked.connect(self._on_connect)
+        btn_row.addWidget(self.btn_connect)
 
-        self.btn_disconnect = ttk.Button(btn_row, text="Trennen",
-                                          style="Disconnect.TButton",
-                                          command=self._on_disconnect,
-                                          state="disabled")
-        self.btn_disconnect.pack(side="left", padx=(8, 0))
+        self.btn_disconnect = _make_btn("Trennen", C["red"], "#ffffff", "#fca5a5")
+        self.btn_disconnect.clicked.connect(self._on_disconnect)
+        self.btn_disconnect.setEnabled(False)
+        btn_row.addWidget(self.btn_disconnect)
 
-        self.btn_cancel = ttk.Button(btn_row, text="Abbrechen",
-                                      style="Cancel.TButton",
-                                      command=self._on_cancel)
-        # initial versteckt – wird nur während Verbindungsaufbau angezeigt
+        self.btn_cancel = _make_btn("Abbrechen", C["orange"], "#000000", C["yellow"])
+        self.btn_cancel.clicked.connect(self._on_cancel)
+        self.btn_cancel.hide()
+        btn_row.addWidget(self.btn_cancel)
 
-        self.btn_browser = ttk.Button(btn_row, text="Im Browser oeffnen",
-                                       style="Action.TButton",
-                                       command=self._on_open_browser,
-                                       state="disabled")
-        self.btn_browser.pack(side="left", padx=(8, 0))
+        self.btn_browser = _make_btn("Im Browser oeffnen", C["surface"], C["fg"], C["border"])
+        self.btn_browser.clicked.connect(self._on_open_browser)
+        self.btn_browser.setEnabled(False)
+        btn_row.addWidget(self.btn_browser)
+
+        btn_row.addStretch()
+        wg_layout.addLayout(btn_row)
+        main_layout.addWidget(wg_card)
+        main_layout.addSpacing(16)
 
         # ── UpSnap Sektion ──
-        ttk.Label(outer, text="UPSNAP  /  WAKE ON LAN", style="H2.TLabel").pack(
-            anchor="w", padx=pad, pady=(0, 6))
+        snap_header = QLabel("UPSNAP  /  WAKE ON LAN")
+        snap_header.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        snap_header.setStyleSheet(f"color: {C['dim']};")
+        main_layout.addWidget(snap_header)
+        main_layout.addSpacing(6)
 
-        snap = tk.Frame(outer, bg=C["card"], padx=14, pady=14)
-        snap.pack(fill="x", padx=pad, pady=(0, 12))
+        snap_card = QFrame()
+        snap_card.setStyleSheet(f"""
+            QFrame {{ background-color: {C['card']}; border-radius: 8px; }}
+        """)
+        snap_layout = QVBoxLayout(snap_card)
+        snap_layout.setContentsMargins(14, 14, 14, 14)
+        snap_layout.setSpacing(8)
 
-        login_row = tk.Frame(snap, bg=C["card"])
-        login_row.pack(fill="x", pady=(0, 8))
+        login_row = QHBoxLayout()
+        login_row.setSpacing(6)
 
-        lbl_cfg = {"bg": C["card"], "fg": C["dim"], "font": ("Segoe UI", 9)}
+        lbl_email = QLabel("E-Mail")
+        lbl_email.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        login_row.addWidget(lbl_email)
+        self.entry_user = QLineEdit()
+        self.entry_user.setFixedWidth(180)
+        self.entry_user.returnPressed.connect(lambda: self.entry_pass.setFocus())
+        login_row.addWidget(self.entry_user)
 
-        tk.Label(login_row, text="E-Mail", **lbl_cfg).pack(side="left")
-        self.entry_user = ttk.Entry(login_row, width=22)
-        self.entry_user.pack(side="left", padx=(6, 12))
+        login_row.addSpacing(6)
 
-        tk.Label(login_row, text="Passwort", **lbl_cfg).pack(side="left")
-        self.entry_pass = ttk.Entry(login_row, width=16, show="*")
-        self.entry_pass.pack(side="left", padx=(6, 12))
+        lbl_pw = QLabel("Passwort")
+        lbl_pw.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        login_row.addWidget(lbl_pw)
+        self.entry_pass = QLineEdit()
+        self.entry_pass.setFixedWidth(140)
+        self.entry_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.entry_pass.returnPressed.connect(self._on_upsnap_login)
+        login_row.addWidget(self.entry_pass)
 
-        self.btn_login = ttk.Button(login_row, text="Anmelden",
-                                     style="Login.TButton",
-                                     command=self._on_upsnap_login)
-        self.btn_login.pack(side="left")
-        # Enter-Taste → Anmelden
-        self.entry_pass.bind("<Return>", lambda _: self._on_upsnap_login())
-        self.entry_user.bind("<Return>", lambda _: self.entry_pass.focus())
+        login_row.addSpacing(6)
 
-        self.btn_refresh_devices = ttk.Button(login_row, text="Aktualisieren",
-                                               style="Small.TButton",
-                                               command=self._on_refresh_devices,
-                                               state="disabled")
-        self.btn_refresh_devices.pack(side="left", padx=(8, 0))
+        self.btn_login = _make_btn("Anmelden", C["accent"], "#ffffff", C["accent_h"])
+        self.btn_login.clicked.connect(self._on_upsnap_login)
+        login_row.addWidget(self.btn_login)
 
-        sep = tk.Frame(snap, bg=C["border"], height=1)
-        sep.pack(fill="x", pady=(4, 8))
+        self.btn_refresh_devices = _make_btn("Aktualisieren", C["surface"], C["fg"], C["border"])
+        self.btn_refresh_devices.setStyleSheet(
+            self.btn_refresh_devices.styleSheet().replace("font-weight: bold;", "font-weight: normal;"))
+        self.btn_refresh_devices.clicked.connect(self._on_refresh_devices)
+        self.btn_refresh_devices.setEnabled(False)
+        login_row.addWidget(self.btn_refresh_devices)
 
-        self.device_frame = tk.Frame(snap, bg=C["card"])
-        self.device_frame.pack(fill="x")
+        login_row.addStretch()
+        snap_layout.addLayout(login_row)
 
-        self.upsnap_hint = tk.Label(
-            self.device_frame, text="Anmelden um Geraete anzuzeigen",
-            bg=C["card"], fg=C["dim"], font=("Segoe UI", 9))
-        self.upsnap_hint.pack(pady=4)
+        # Separator
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background-color: {C['border']};")
+        snap_layout.addWidget(sep)
+
+        # Device-Bereich
+        self.device_frame = QVBoxLayout()
+        self.device_frame.setSpacing(2)
+        self.upsnap_hint = QLabel("Anmelden um Geraete anzuzeigen")
+        self.upsnap_hint.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        self.upsnap_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.device_frame.addWidget(self.upsnap_hint)
+        snap_layout.addLayout(self.device_frame)
+
+        main_layout.addWidget(snap_card)
+        main_layout.addSpacing(12)
 
         # ── Log Toggle ──
-        self.log_toggle = ttk.Button(outer, text="[+] Log",
-                                      style="Toggle.TButton",
-                                      command=self._toggle_log)
-        self.log_toggle.pack(anchor="w", padx=pad, pady=(4, 0))
+        self.log_toggle = QPushButton("[+] Log")
+        self.log_toggle.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C['dim']};
+                border: none; font-size: 9pt; padding: 4px 2px;
+                text-align: left;
+            }}
+            QPushButton:hover {{ color: {C['fg']}; }}
+        """)
+        self.log_toggle.clicked.connect(self._toggle_log)
+        main_layout.addWidget(self.log_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        self.log_frame = tk.Frame(outer, bg=C["card"], padx=8, pady=8)
+        # Log Frame
+        self.log_frame = QFrame()
+        self.log_frame.setStyleSheet(f"background-color: {C['card']}; border-radius: 6px;")
+        log_layout = QVBoxLayout(self.log_frame)
+        log_layout.setContentsMargins(8, 8, 8, 8)
 
-        self.log_text = tk.Text(
-            self.log_frame, height=8, bg=C["surface"], fg=C["dim"],
-            font=("Consolas", 9), bd=0, highlightthickness=0,
-            wrap="word", state="disabled", insertbackground=C["fg"],
-        )
-        sb2 = ttk.Scrollbar(self.log_frame, command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=sb2.set)
-        sb2.pack(side="right", fill="y")
-        self.log_text.pack(fill="both", expand=True)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setFont(QFont("Consolas", 9))
+        self.log_text.setMaximumHeight(200)
+        log_layout.addWidget(self.log_text)
 
-    # ── Status-Punkt ──────────────────────────────────────────────────────
+        self.log_frame.hide()
+        main_layout.addWidget(self.log_frame)
 
-    def _draw_dot(self, color: str):
-        self.status_dot.delete("all")
-        self.status_dot.create_oval(1, 1, 11, 11, fill=color, outline=color)
+        main_layout.addStretch()
+
+    # ── Status ─────────────────────────────────────────────────────────────
 
     def _set_status(self, text: str, color: str):
-        self._draw_dot(color)
-        self.status_label.configure(text=text, foreground=color)
+        self.status_dot.set_color(color)
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"color: {color}; background: transparent;")
 
-    # ── Log ───────────────────────────────────────────────────────────────
+    # ── Log ────────────────────────────────────────────────────────────────
 
     def _toggle_log(self):
         if self._log_visible:
-            self.log_frame.pack_forget()
-            self.log_toggle.configure(text="[+] Log")
+            self.log_frame.hide()
+            self.log_toggle.setText("[+] Log")
             self._log_visible = False
         else:
-            self.log_frame.pack(fill="x", padx=20, pady=(4, 20))
-            self.log_toggle.configure(text="[-] Log")
+            self.log_frame.show()
+            self.log_toggle.setText("[-] Log")
             self._log_visible = True
 
-    def append_log(self, msg: str):
-        def _do():
-            self.log_text.configure(state="normal")
-            self.log_text.insert("end", f"[{time.strftime('%H:%M:%S')}] {msg}\n")
-            # Max 500 Zeilen behalten
-            line_count = int(self.log_text.index("end-1c").split(".")[0])
-            if line_count > 500:
-                self.log_text.delete("1.0", f"{line_count - 500}.0")
-            self.log_text.see("end")
-            self.log_text.configure(state="disabled")
-        self.root.after(0, _do)
+    def _append_log(self, msg: str):
+        self.log_text.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+        # Max 500 Zeilen
+        doc = self.log_text.document()
+        if doc.blockCount() > 500:
+            cursor = self.log_text.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)
+            cursor.movePosition(cursor.MoveOperation.Down,
+                                cursor.MoveMode.KeepAnchor,
+                                doc.blockCount() - 500)
+            cursor.removeSelectedText()
+        sb = self.log_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
-    # ── Configs ───────────────────────────────────────────────────────────
+    # Kompatibilitäts-Wrapper
+    def append_log(self, msg: str):
+        self.sig.log_signal.emit(msg)
+
+    # ── Configs ────────────────────────────────────────────────────────────
 
     def _load_configs(self):
         self.configs = collect_all_configs()
-        self.config_listbox.delete(0, "end")
+        self.config_listbox.clear()
         if not self.configs:
-            self.config_listbox.insert("end", "  Keine Konfigurationen gefunden")
-            self.btn_connect.configure(state="disabled")
+            self.config_listbox.addItem("  Keine Konfigurationen gefunden")
+            self.btn_connect.setEnabled(False)
         else:
             for name, _ in self.configs:
-                self.config_listbox.insert("end", f"  {name}")
-            self.config_listbox.selection_set(0)
+                self.config_listbox.addItem(f"  {name}")
+            self.config_listbox.setCurrentRow(0)
 
-    # ── Auto-Update ───────────────────────────────────────────────────────
+    # ── Auto-Update ────────────────────────────────────────────────────────
 
     def _check_update_bg(self):
-        """Wird in einem Hintergrund-Thread aufgerufen."""
         info = check_for_update()
         if info:
             self._update_info = info
-            self.root.after(0, self._show_update_btn)
+            self.sig.update_available_signal.emit(info)
 
-    def _show_update_btn(self):
-        info = self._update_info
-        if not info:
-            return
+    def _show_update_btn(self, info: dict):
         tag = info["tag"]
         size_mb = info.get("size", 0) / (1024 * 1024)
-        self.btn_update.configure(
-            text=f"⬆ Update {tag}  ({size_mb:.1f} MB)")
-        self.btn_update.pack(side="left", padx=(16, 0))
+        self.btn_update.setText(f"⬆ Update {tag}  ({size_mb:.1f} MB)")
+        self.btn_update.show()
 
     def _on_update(self):
         info = self._update_info
         if not info:
             return
-        if not messagebox.askyesno(
-            "Update",
+        reply = QMessageBox.question(
+            self, "Update",
             f"Version {info['tag']} herunterladen und installieren?\n\n"
-            f"Die App wird nach dem Update automatisch neu gestartet."):
+            f"Die App wird nach dem Update automatisch neu gestartet.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
-        self.btn_update.configure(state="disabled", text="⬆ Lade herunter...")
+        self.btn_update.setEnabled(False)
+        self.btn_update.setText("⬆ Lade herunter...")
 
         def work():
             dest = os.path.join(_base_dir, "VPN_Connect_new.exe")
+
             def progress(done, total):
                 if total > 0:
                     pct = int(done / total * 100)
-                    self.root.after(0,
-                        lambda: self.btn_update.configure(
-                            text=f"⬆ {pct}%  ({done // 1024 // 1024}/{total // 1024 // 1024} MB)"))
+                    self.sig.update_progress_signal.emit(
+                        f"⬆ {pct}%  ({done // 1024 // 1024}/{total // 1024 // 1024} MB)")
 
             ok = download_update(info["url"], dest, progress)
             if ok:
-                self.root.after(0, lambda: self._apply_update(dest))
+                self.sig.apply_update_signal.emit(dest)
             else:
-                self.root.after(0, lambda: (
-                    self.btn_update.configure(state="normal",
-                                              text="⬆ Download fehlgeschlagen"),
-                    messagebox.showerror("Update", "Download fehlgeschlagen.")))
+                self.sig.update_failed_signal.emit()
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _on_update_failed(self):
+        self.btn_update.setEnabled(True)
+        self.btn_update.setText("⬆ Download fehlgeschlagen")
+        QMessageBox.critical(self, "Update", "Download fehlgeschlagen.")
+
     def _apply_update(self, new_exe: str):
         log("Installiere Update...")
-        # VPN trennen falls verbunden
         if self.active_config:
             disconnect_vpn(self.active_config)
         apply_update(new_exe)
 
-    # ── VPN Connect ───────────────────────────────────────────────────────
+    # ── VPN Connect ────────────────────────────────────────────────────────
 
     def _on_connect(self):
-        sel = self.config_listbox.curselection()
-        if not sel or not self.configs:
+        sel = self.config_listbox.currentRow()
+        if sel < 0 or not self.configs:
             return
-        _, path = self.configs[sel[0]]
-        self.btn_connect.configure(state="disabled")
-        self.btn_cancel.pack(side="left", padx=(8, 0))  # Abbrechen zeigen
+        _, path = self.configs[sel]
+        self.btn_connect.setEnabled(False)
+        self.btn_cancel.show()
         self._set_status("Verbinde...", C["yellow"])
 
         def work():
             global _active_config
             r = connect_vpn(path)
             if _cancel_event.is_set():
-                # Abgebrochen – aufräumen falls nötig
                 if r:
                     disconnect_vpn(r)
-                self.root.after(0, self._disconnected)
-                self.root.after(0, lambda: self.btn_cancel.pack_forget())
+                self.sig.disconnected_signal.emit()
+                self.sig.cancel_done_signal.emit()
                 return
             if r:
                 self.active_config = r
                 _active_config = r
                 self.vpn_connected = True
                 ok = check_connection(TARGET_IP, TARGET_PORT, retries=5, delay=2.0)
-                self.root.after(0, lambda: self._connected(ok))
+                self.sig.connected_signal.emit(ok)
             else:
-                self.root.after(0, self._disconnected)
-            self.root.after(0, lambda: self.btn_cancel.pack_forget())
+                self.sig.disconnected_signal.emit()
+            self.sig.cancel_done_signal.emit()
         threading.Thread(target=work, daemon=True).start()
 
     def _on_cancel(self):
-        """Bricht den Verbindungsaufbau ab."""
         log("Abbrechen angefordert...")
         _cancel_event.set()
-        self.btn_cancel.configure(state="disabled", text="Abbreche...")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setText("Abbreche...")
         self._set_status("Abbreche...", C["orange"])
 
     def _connected(self, reachable: bool):
         self._set_status("Verbunden", C["green"])
-        self.btn_connect.configure(state="disabled")
-        self.btn_disconnect.configure(state="normal")
-        self.btn_browser.configure(state="normal" if reachable else "disabled")
+        self.btn_connect.setEnabled(False)
+        self.btn_disconnect.setEnabled(True)
+        self.btn_browser.setEnabled(reachable)
         if reachable:
             log(f"Ziel {TARGET_IP}:{TARGET_PORT} erreichbar.")
         else:
@@ -1092,35 +1225,36 @@ class VPNApp:
 
     def _disconnected(self):
         self._set_status("Getrennt", C["red"])
-        self.btn_connect.configure(state="normal")
-        self.btn_disconnect.configure(state="disabled")
-        self.btn_browser.configure(state="disabled")
-        self.btn_cancel.pack_forget()
-        self.btn_cancel.configure(state="normal", text="Abbrechen")
+        self.btn_connect.setEnabled(True)
+        self.btn_disconnect.setEnabled(False)
+        self.btn_browser.setEnabled(False)
+        self.btn_cancel.hide()
+        self.btn_cancel.setEnabled(True)
+        self.btn_cancel.setText("Abbrechen")
         self.vpn_connected = False
         self.active_config = None
 
-    # ── VPN Disconnect ────────────────────────────────────────────────────
+    # ── VPN Disconnect ─────────────────────────────────────────────────────
 
     def _on_disconnect(self):
         global _active_config
-        self.btn_disconnect.configure(state="disabled")
+        self.btn_disconnect.setEnabled(False)
         self._set_status("Trenne...", C["yellow"])
 
         def work():
+            global _active_config
             if self.active_config:
                 disconnect_vpn(self.active_config)
                 _active_config = None
-            self.root.after(0, self._disconnected)
+            self.sig.disconnected_signal.emit()
         threading.Thread(target=work, daemon=True).start()
 
-    # ── Browser ───────────────────────────────────────────────────────────
+    # ── Browser ────────────────────────────────────────────────────────────
 
     def _on_open_browser(self):
         url = f"http://{TARGET_IP}:{TARGET_PORT}"
         log(f"Oeffne {url}...")
 
-        # Methode 1: rundll32 – öffnet URL zuverlässig auch aus Admin-Prozessen
         try:
             subprocess.Popen(["rundll32", "url.dll,FileProtocolHandler", url])
             log("Browser geöffnet (rundll32).")
@@ -1128,7 +1262,6 @@ class VPNApp:
         except Exception as e:
             log(f"rundll32 fehlgeschlagen: {e}", "warning")
 
-        # Methode 2: explorer.exe – läuft immer als normaler Benutzer
         try:
             subprocess.Popen(["explorer", url])
             log("Browser geöffnet (explorer).")
@@ -1136,7 +1269,6 @@ class VPNApp:
         except Exception as e:
             log(f"explorer fehlgeschlagen: {e}", "warning")
 
-        # Methode 3: webbrowser-Modul als letzter Fallback
         try:
             import webbrowser
             webbrowser.open(url)
@@ -1144,7 +1276,7 @@ class VPNApp:
         except Exception as e:
             log(f"Browser-Fehler: {e}", "error")
 
-    # ── Credentials (speichern/laden) ─────────────────────────────────────
+    # ── Credentials ────────────────────────────────────────────────────────
 
     _CRED_FILE = os.path.join(_base_dir, "vpn_settings.json")
 
@@ -1160,44 +1292,38 @@ class VPNApp:
             if os.path.exists(self._CRED_FILE):
                 with open(self._CRED_FILE, "r", encoding="utf-8") as f:
                     d = json.load(f)
-                self.entry_user.insert(0, d.get("user", ""))
-                self.entry_pass.insert(0, d.get("pw", ""))
+                self.entry_user.setText(d.get("user", ""))
+                self.entry_pass.setText(d.get("pw", ""))
         except Exception:
             pass
 
-    # ── Auto-Refresh ──────────────────────────────────────────────────────
+    # ── Auto-Refresh ───────────────────────────────────────────────────────
 
     def _start_auto_refresh(self):
-        """Startet automatisches Aktualisieren der Geräteliste alle 30s."""
-        self._stop_auto_refresh()
-        self._auto_refresh_id = self.root.after(30_000, self._auto_refresh_tick)
+        self._auto_refresh_timer.start()
 
     def _stop_auto_refresh(self):
-        if self._auto_refresh_id:
-            self.root.after_cancel(self._auto_refresh_id)
-            self._auto_refresh_id = None
+        self._auto_refresh_timer.stop()
 
     def _auto_refresh_tick(self):
         if self.upsnap and self.vpn_connected:
             def work():
                 try:
                     devs = self.upsnap.get_devices()
-                    self.root.after(0, lambda: self._show_devices(devs))
+                    self.sig.show_devices_signal.emit(devs)
                 except Exception:
                     pass
             threading.Thread(target=work, daemon=True).start()
-        # Nächster Tick in 30s
-        self._auto_refresh_id = self.root.after(30_000, self._auto_refresh_tick)
 
-    # ── UpSnap Login ──────────────────────────────────────────────────────
+    # ── UpSnap Login ───────────────────────────────────────────────────────
 
     def _on_upsnap_login(self):
-        u = self.entry_user.get().strip()
-        p = self.entry_pass.get().strip()
+        u = self.entry_user.text().strip()
+        p = self.entry_pass.text().strip()
         if not u or not p:
-            messagebox.showinfo("UpSnap", "E-Mail und Passwort eingeben.")
+            QMessageBox.information(self, "UpSnap", "E-Mail und Passwort eingeben.")
             return
-        self.btn_login.configure(state="disabled")
+        self.btn_login.setEnabled(False)
 
         def work():
             try:
@@ -1205,23 +1331,22 @@ class VPNApp:
                 if c.token:
                     self.upsnap = c
                     devs = c.get_devices()
-                    self.root.after(0, lambda: self._show_devices(devs))
-                    self.root.after(0, lambda: self.btn_refresh_devices.configure(state="normal"))
-                    # Credentials speichern und Auto-Refresh starten
-                    self.root.after(0, lambda: self._save_credentials(u, p))
-                    self.root.after(0, self._start_auto_refresh)
+                    self.sig.show_devices_signal.emit(devs)
+                    self.sig.enable_refresh_signal.emit()
+                    # Credentials speichern (muss im Main-Thread)
+                    QTimer.singleShot(0, lambda: self._save_credentials(u, p))
+                    QTimer.singleShot(0, self._start_auto_refresh)
                 else:
-                    self.root.after(0, lambda: self.btn_login.configure(state="normal"))
+                    self.sig.enable_login_signal.emit()
             except Exception as e:
                 log(f"UpSnap Login Fehler: {e}", "error")
-                self.root.after(0, lambda: self.btn_login.configure(state="normal"))
+                self.sig.enable_login_signal.emit()
         threading.Thread(target=work, daemon=True).start()
 
     def _on_refresh_devices(self):
-        """Geräteliste aktualisieren."""
         if not self.upsnap:
             return
-        self.btn_refresh_devices.configure(state="disabled")
+        self.btn_refresh_devices.setEnabled(False)
         log("Geräteliste wird aktualisiert...")
 
         def work():
@@ -1230,133 +1355,161 @@ class VPNApp:
             except Exception as e:
                 log(f"Geräteliste Fehler: {e}", "error")
                 devs = []
-            self.root.after(0, lambda: self._show_devices(devs))
-            self.root.after(0, lambda: self.btn_refresh_devices.configure(state="normal"))
+            self.sig.show_devices_signal.emit(devs)
+            self.sig.enable_refresh_signal.emit()
         threading.Thread(target=work, daemon=True).start()
 
+    # ── Device-Anzeige ─────────────────────────────────────────────────────
+
     def _show_devices(self, devices: List[dict]):
+        # Alte Widgets entfernen
         for w in self._device_widgets:
-            w.destroy()
+            w.setParent(None)
+            w.deleteLater()
         self._device_widgets.clear()
-        self.upsnap_hint.pack_forget()
+        self.upsnap_hint.hide()
 
         if not devices:
-            lbl = tk.Label(self.device_frame, text="Keine Geraete.",
-                           bg=C["card"], fg=C["dim"], font=("Segoe UI", 9))
-            lbl.pack(pady=4)
+            lbl = QLabel("Keine Geraete.")
+            lbl.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.device_frame.addWidget(lbl)
             self._device_widgets.append(lbl)
-            self.btn_login.configure(state="normal")
+            self.btn_login.setEnabled(True)
             return
 
         for d in devices:
-            row = tk.Frame(self.device_frame, bg=C["surface"], pady=7, padx=12)
-            row.pack(fill="x", pady=2)
-            self._device_widgets.append(row)
-            row.columnconfigure(1, weight=1)
+            row = QFrame()
+            row.setStyleSheet(f"""
+                QFrame {{ background-color: {C['surface']}; border-radius: 4px; }}
+            """)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(12, 7, 12, 7)
+            row_layout.setSpacing(8)
 
             name  = d.get("name", "?")
             ip    = d.get("ip", "?")
             online = d.get("status") == "online"
             dot_c  = C["green"] if online else C["dim"]
 
-            # Status-Punkt (Canvas)
-            dot = tk.Canvas(row, width=10, height=10, bg=C["surface"],
-                            highlightthickness=0)
-            dot.create_oval(1, 1, 9, 9, fill=dot_c, outline=dot_c)
-            dot.grid(row=0, column=0, padx=(0, 8), sticky="w")
+            dot = DotWidget(dot_c, 10)
+            row_layout.addWidget(dot)
 
-            # Name
-            tk.Label(row, text=name, bg=C["surface"], fg=C["fg"],
-                     font=("Segoe UI", 10), anchor="w"
-                     ).grid(row=0, column=1, sticky="w")
+            name_lbl = QLabel(name)
+            name_lbl.setStyleSheet(f"color: {C['fg']}; font-size: 10pt;")
+            row_layout.addWidget(name_lbl)
 
-            # IP
-            tk.Label(row, text=ip, bg=C["surface"], fg=C["dim"],
-                     font=("Segoe UI", 9), anchor="w"
-                     ).grid(row=0, column=2, padx=(8, 12), sticky="w")
+            ip_lbl = QLabel(ip)
+            ip_lbl.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+            row_layout.addWidget(ip_lbl)
 
-            # Status-Label (Offline / Einschalten... / Online)
+            row_layout.addStretch()
+
+            # Status-Label
             init_txt = "Online" if online else "Offline"
             init_col = C["green"] if online else C["dim"]
-            status_lbl = tk.Label(row, text=init_txt, bg=C["surface"],
-                                  fg=init_col, font=("Segoe UI", 8, "bold"),
-                                  width=11, anchor="w")
-            status_lbl.grid(row=0, column=3, padx=(0, 10), sticky="w")
+            status_lbl = QLabel(init_txt)
+            status_lbl.setFixedWidth(80)
+            status_lbl.setStyleSheet(
+                f"color: {init_col}; font-size: 8pt; font-weight: bold;")
+            row_layout.addWidget(status_lbl)
 
             # Buttons
-            btns = tk.Frame(row, bg=C["surface"])
-            btns.grid(row=0, column=4, sticky="e")
-
             did, dip, dn = d.get("id", ""), ip, name
-            btn_refs: List[ttk.Button] = []
+            btn_refs: List[QPushButton] = []
 
             if online:
-                b = ttk.Button(btns, text="RDP", style="Small.TButton",
-                               command=lambda x=dip, n=dn, bl=btn_refs,
-                                              sl=status_lbl:
-                               self._on_rdp(x, n, bl, sl))
-                b.pack(side="left", padx=(0, 4))
+                b = _make_btn("RDP", C["surface"], C["fg"], C["border"])
+                b.setStyleSheet(b.styleSheet().replace(
+                    "font-weight: bold;", "font-weight: normal; font-size: 9pt;"))
+                b.clicked.connect(
+                    lambda checked, x=dip, n=dn, bl=btn_refs, sl=status_lbl:
+                    self._on_rdp(x, n, bl, sl))
+                row_layout.addWidget(b)
                 btn_refs.append(b)
             else:
-                b1 = ttk.Button(btns, text="WoL", style="Small.TButton",
-                                command=lambda x=did, n=dn, bl=btn_refs,
-                                               sl=status_lbl:
-                                self._on_wake(x, n, bl, sl))
-                b1.pack(side="left", padx=(0, 4))
+                b1 = _make_btn("WoL", C["surface"], C["fg"], C["border"])
+                b1.setStyleSheet(b1.styleSheet().replace(
+                    "font-weight: bold;", "font-weight: normal; font-size: 9pt;"))
+                b1.clicked.connect(
+                    lambda checked, x=did, n=dn, bl=btn_refs, sl=status_lbl:
+                    self._on_wake(x, n, bl, sl))
+                row_layout.addWidget(b1)
 
-                b2 = ttk.Button(btns, text="WoL + RDP", style="Small.TButton",
-                                command=lambda x=did, y=dip, n=dn,
-                                               bl=btn_refs, sl=status_lbl:
-                                self._on_wake_rdp(x, y, n, bl, sl))
-                b2.pack(side="left", padx=(0, 4))
+                b2 = _make_btn("WoL + RDP", C["surface"], C["fg"], C["border"])
+                b2.setStyleSheet(b2.styleSheet().replace(
+                    "font-weight: bold;", "font-weight: normal; font-size: 9pt;"))
+                b2.clicked.connect(
+                    lambda checked, x=did, y=dip, n=dn, bl=btn_refs, sl=status_lbl:
+                    self._on_wake_rdp(x, y, n, bl, sl))
+                row_layout.addWidget(b2)
 
                 btn_refs += [b1, b2]
 
-        self.btn_login.configure(state="normal")
+            self.device_frame.addWidget(row)
+            self._device_widgets.append(row)
 
-    # ── Hilfsmethoden für Device-Status ──────────────────────────────────
+        self.btn_login.setEnabled(True)
 
-    @staticmethod
-    def _set_device_status(status_lbl: tk.Label,
-                           text: str, color: str):
-        """Setzt den Status-Text eines Geräts (thread-safe via after)."""
+    # ── Device-Status Hilfsfunktionen ──────────────────────────────────────
+
+    def _set_device_status_slot(self, lbl, text: str, color: str):
+        """Slot für thread-safe Status-Update."""
         try:
-            status_lbl.configure(text=text, fg=color)
-        except tk.TclError:
-            pass  # Widget bereits zerstört
+            lbl.setText(text)
+            lbl.setStyleSheet(
+                f"color: {color}; font-size: 8pt; font-weight: bold;")
+        except RuntimeError:
+            pass
 
     @staticmethod
-    def _set_btns(btn_refs: list, state: str):
+    def _set_device_status(status_lbl: QLabel, text: str, color: str):
+        """Direkt im Main-Thread aufrufen."""
+        try:
+            status_lbl.setText(text)
+            status_lbl.setStyleSheet(
+                f"color: {color}; font-size: 8pt; font-weight: bold;")
+        except RuntimeError:
+            pass
+
+    def _set_btns_slot(self, btn_refs: list, enabled: bool):
         for b in btn_refs:
             try:
-                b.configure(state=state)
-            except tk.TclError:
+                b.setEnabled(enabled)
+            except RuntimeError:
                 pass
 
-    # ── Device Actions ────────────────────────────────────────────────────
+    @staticmethod
+    def _set_btns(btn_refs: list, enabled: bool):
+        for b in btn_refs:
+            try:
+                b.setEnabled(enabled)
+            except RuntimeError:
+                pass
+
+    # ── Device-Actions ─────────────────────────────────────────────────────
 
     def _on_wake(self, did: str, name: str,
-                 btn_refs: list, status_lbl: tk.Label):
+                 btn_refs: list, status_lbl: QLabel):
         if not self.upsnap:
             return
-        self._set_btns(btn_refs, "disabled")
+        self._set_btns(btn_refs, False)
         self._set_device_status(status_lbl, "WoL senden...", C["yellow"])
         log(f"WoL -> '{name}'")
 
         def work():
             self.upsnap.wake(did)
-            self.root.after(0, lambda: self._set_device_status(
-                status_lbl, "Einschalten...", C["orange"]))
-            self.root.after(3000, lambda: self._set_btns(btn_refs, "normal"))
-            self.root.after(3000, lambda: self._set_device_status(
+            self.sig.device_status_signal.emit(status_lbl, "Einschalten...", C["orange"])
+            QTimer.singleShot(3000, lambda: self.sig.btns_state_signal.emit(btn_refs, True))
+            QTimer.singleShot(3000, lambda: self.sig.device_status_signal.emit(
                 status_lbl, "Offline", C["dim"]))
         threading.Thread(target=work, daemon=True).start()
 
     def _on_rdp(self, ip: str, name: str,
-                btn_refs: list = None, status_lbl: tk.Label = None):
+                btn_refs: list = None, status_lbl: QLabel = None):
         log(f"RDP -> '{name}' ({ip})")
         if btn_refs:
-            self._set_btns(btn_refs, "disabled")
+            self._set_btns(btn_refs, False)
         if status_lbl:
             self._set_device_status(status_lbl, "RDP starten...", C["cyan"])
         try:
@@ -1369,9 +1522,9 @@ class VPNApp:
             subprocess.Popen(["explorer.exe", rdp_path])
             log(f"RDP gestartet: {rdp_path}")
             if status_lbl:
-                self.root.after(2000, lambda: self._set_device_status(
+                QTimer.singleShot(2000, lambda: self.sig.device_status_signal.emit(
                     status_lbl, "Online", C["green"]))
-            # Temp-Datei nach 8s löschen (mstsc hat sie dann schon gelesen)
+
             def _del():
                 time.sleep(8)
                 try:
@@ -1384,20 +1537,19 @@ class VPNApp:
             log(f"RDP Fehler: {e}", "error")
         finally:
             if btn_refs:
-                self.root.after(3000, lambda: self._set_btns(btn_refs, "normal"))
+                QTimer.singleShot(3000, lambda: self.sig.btns_state_signal.emit(btn_refs, True))
 
     def _on_wake_rdp(self, did: str, ip: str, name: str,
-                     btn_refs: list, status_lbl: tk.Label):
+                     btn_refs: list, status_lbl: QLabel):
         if not self.upsnap:
             return
-        self._set_btns(btn_refs, "disabled")
+        self._set_btns(btn_refs, False)
         self._set_device_status(status_lbl, "WoL senden...", C["yellow"])
         log(f"WoL + RDP -> '{name}'")
 
         def work():
             self.upsnap.wake(did)
-            self.root.after(0, lambda: self._set_device_status(
-                status_lbl, "Einschalten...", C["orange"]))
+            self.sig.device_status_signal.emit(status_lbl, "Einschalten...", C["orange"])
             log(f"Warte auf '{name}' (max 120s)...")
             t0 = time.time()
             while time.time() - t0 < 120:
@@ -1407,36 +1559,51 @@ class VPNApp:
                     s.connect((ip, 3389))
                     s.close()
                     log(f"'{name}' bereit!")
-                    self.root.after(0, lambda: self._set_device_status(
-                        status_lbl, "Online", C["green"]))
+                    self.sig.device_status_signal.emit(status_lbl, "Online", C["green"])
                     time.sleep(3)
-                    self.root.after(0, lambda: self._on_rdp(
-                        ip, name, btn_refs, status_lbl))
+                    self.sig.trigger_rdp_signal.emit(ip, name, btn_refs, status_lbl)
                     return
                 except Exception:
                     pass
                 elapsed = int(time.time() - t0)
-                self.root.after(0, lambda e=elapsed: self._set_device_status(
-                    status_lbl, f"Warte {e}s...", C["orange"]))
+                self.sig.device_status_signal.emit(
+                    status_lbl, f"Warte {elapsed}s...", C["orange"])
                 log(f"  Warte... ({elapsed}s)")
                 time.sleep(2)
 
             log(f"'{name}' nicht erreichbar.", "warning")
-            self.root.after(0, lambda: self._set_device_status(
-                status_lbl, "Timeout", C["red"]))
-            self.root.after(0, lambda: self._set_btns(btn_refs, "normal"))
-            # messagebox muss im main thread laufen
-            self.root.after(0, lambda: self._ask_rdp_anyway(
-                ip, name, btn_refs, status_lbl))
+            self.sig.device_status_signal.emit(status_lbl, "Timeout", C["red"])
+            self.sig.btns_state_signal.emit(btn_refs, True)
+            self.sig.ask_rdp_signal.emit(ip, name, btn_refs, status_lbl)
 
         threading.Thread(target=work, daemon=True).start()
 
     def _ask_rdp_anyway(self, ip, name, btn_refs, status_lbl):
-        """Fragt ob RDP trotzdem gestartet werden soll (im main thread)."""
-        if messagebox.askyesno("Timeout",
-                                f"'{name}' antwortet nicht.\nRDP trotzdem starten?"):
+        reply = QMessageBox.question(
+            self, "Timeout",
+            f"'{name}' antwortet nicht.\nRDP trotzdem starten?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
             self._on_rdp(ip, name, btn_refs, status_lbl)
 
+    # ── Close Event ────────────────────────────────────────────────────────
+
+    def closeEvent(self, event):
+        global _active_config
+        if self.active_config:
+            reply = QMessageBox.question(
+                self, "Beenden",
+                "VPN ist verbunden.\nTrennen und beenden?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            disconnect_vpn(self.active_config)
+        _active_config = None
+        self.active_config = None
+        self._stop_auto_refresh()
+        _cleanup_temp_rdp()
+        event.accept()
 
 
 # =============================================================================
@@ -1446,7 +1613,6 @@ class VPNApp:
 def main():
     global _app
 
-    # Nach Update: alte EXE aufräumen
     if "--cleanup" in sys.argv:
         _cleanup_old_exe()
 
@@ -1454,24 +1620,14 @@ def main():
         run_as_admin()
         sys.exit()
 
-    root = tk.Tk()
-    _app = VPNApp(root)
+    app = QApplication(sys.argv)
+    app.setStyleSheet(GLOBAL_QSS)
+    app.setStyle("Fusion")
 
-    def on_close():
-        global _active_config
-        if _app.active_config:
-            if not messagebox.askyesno("Beenden",
-                                        "VPN ist verbunden.\nTrennen und beenden?"):
-                return
-            disconnect_vpn(_app.active_config)
-        _active_config = None
-        _app.active_config = None
-        _app._stop_auto_refresh()
-        _cleanup_temp_rdp()
-        root.destroy()
+    _app = VPNApp()
+    _app.show()
 
-    root.protocol("WM_DELETE_WINDOW", on_close)
-    root.mainloop()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
