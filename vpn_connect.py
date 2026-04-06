@@ -28,7 +28,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -803,8 +803,8 @@ class AppSignals(QObject):
     apply_update_signal = pyqtSignal(str)
     device_status_signal = pyqtSignal(object, str, str)  # label, text, color
     btns_state_signal = pyqtSignal(list, bool)            # btn_refs, enabled
-    trigger_rdp_signal = pyqtSignal(str, str, list, object)  # ip, name, btns, lbl
-    ask_rdp_signal = pyqtSignal(str, str, list, object)
+    trigger_rdp_signal = pyqtSignal(str, str, list, object, str, str)  # ip, name, btns, lbl, user, pw
+    ask_rdp_signal = pyqtSignal(str, str, list, object, str, str)      # ip, name, btns, lbl, user, pw
     ping_result_signal = pyqtSignal(str)              # "{ms} ms" or "---"
     reconnect_signal = pyqtSignal()                   # trigger auto-reconnect
     auto_login_signal = pyqtSignal()                  # trigger upsnap auto-login
@@ -885,6 +885,7 @@ class VPNApp(QMainWindow):
         self._session_config_name: str = ""
         self._favorites: List[str] = []        # device IDs
         self._rdp_users: dict = {}             # device_name -> username
+        self._rdp_passwords: dict = {}         # device_name -> password (base64)
         self._devices_hash: str = ""           # Hash der Geräteliste (Smart-Refresh)
         self._active_ops: set = set()          # Device-IDs mit laufenden Operationen
         self._refresh_in_progress: bool = False  # verhindert parallele API-Aufrufe
@@ -957,7 +958,7 @@ class VPNApp(QMainWindow):
         self.sig.device_status_signal.connect(self._set_device_status_slot)
         self.sig.btns_state_signal.connect(self._set_btns_slot)
         self.sig.trigger_rdp_signal.connect(
-            lambda ip, name, bl, sl: self._on_rdp(ip, name, bl, sl))
+            lambda ip, name, bl, sl, u, pw: self._on_rdp(ip, name, bl, sl, username=u, password=pw))
         self.sig.ask_rdp_signal.connect(self._ask_rdp_anyway)
         self.sig.ping_result_signal.connect(self._update_ping_label)
         self.sig.reconnect_signal.connect(self._on_auto_reconnect)
@@ -1593,6 +1594,7 @@ class VPNApp(QMainWindow):
                 "auto_connect": self.chk_auto_connect.isChecked(),
                 "favorites": self._favorites,
                 "rdp_users": self._rdp_users,
+                "rdp_passwords": self._rdp_passwords,
             })
 
             # Atomar schreiben: erst in .tmp, dann umbenennen
@@ -1647,9 +1649,10 @@ class VPNApp(QMainWindow):
             # Auto-Connect
             self.chk_auto_connect.setChecked(d.get("auto_connect", False))
 
-            # Favoriten & RDP-User
+            # Favoriten & RDP-User & RDP-Passwörter
             self._favorites = d.get("favorites", [])
             self._rdp_users = d.get("rdp_users", {})
+            self._rdp_passwords = d.get("rdp_passwords", {})
 
             # Auto-Connect beim Start
             if d.get("auto_connect", False) and self.configs:
@@ -1962,24 +1965,35 @@ class VPNApp(QMainWindow):
 
     def _on_rdp_with_user(self, ip: str, name: str,
                            btn_refs: list = None, status_lbl: QLabel = None):
-        """RDP mit optionalem Benutzernamen-Dialog."""
-        user = self._ask_rdp_user(name)
-        self._on_rdp(ip, name, btn_refs, status_lbl, username=user)
+        """RDP mit optionalem Benutzernamen- und Passwort-Dialog."""
+        user, pw = self._ask_rdp_credentials(name)
+        self._on_rdp(ip, name, btn_refs, status_lbl, username=user, password=pw)
 
     def _on_rdp(self, ip: str, name: str,
                 btn_refs: list = None, status_lbl: QLabel = None,
-                username: Optional[str] = None):
+                username: Optional[str] = None, password: Optional[str] = None):
         log(f"RDP -> '{name}' ({ip})")
         if btn_refs:
             self._set_btns(btn_refs, False)
         if status_lbl:
             self._set_device_status(status_lbl, "RDP starten...", C["cyan"])
         try:
+            # Credentials via cmdkey hinterlegen (ermöglicht automatisches Login)
+            if username and password:
+                try:
+                    _run_silent(
+                        ["cmdkey", f"/add:{ip}", f"/user:{username}", f"/pass:{password}"],
+                        capture_output=True, timeout=10)
+                    log(f"RDP: Credentials für {ip} hinterlegt.")
+                except Exception as e:
+                    log(f"cmdkey Fehler: {e}", "warning")
+
             rdp_path = os.path.join(
                 os.environ.get("TEMP", _base_dir), f"_vpn_{name}.rdp")
             with open(rdp_path, "w") as f:
                 f.write(f"full address:s:{ip}\n")
-                f.write("prompt for credentials:i:1\n")
+                # Kein Credential-Prompt wenn cmdkey gesetzt
+                f.write(f"prompt for credentials:i:{'0' if (username and password) else '1'}\n")
                 f.write("authentication level:i:0\n")
                 if username:
                     f.write(f"username:s:{username}\n")
@@ -1996,6 +2010,15 @@ class VPNApp(QMainWindow):
                     log(f"Temp-RDP gelöscht: {rdp_path}")
                 except OSError:
                     pass
+                # cmdkey-Eintrag nach 10s wieder entfernen
+                if username and password:
+                    time.sleep(2)
+                    try:
+                        _run_silent(["cmdkey", f"/delete:{ip}"],
+                                    capture_output=True, timeout=10)
+                        log(f"RDP: Credentials für {ip} entfernt.")
+                    except Exception:
+                        pass
             threading.Thread(target=_del, daemon=True).start()
         except Exception as e:
             log(f"RDP Fehler: {e}", "error")
@@ -2007,6 +2030,8 @@ class VPNApp(QMainWindow):
                      btn_refs: list, status_lbl: QLabel):
         if not self.upsnap:
             return
+        # Credentials im Main-Thread abfragen (vor dem Hintergrund-Thread)
+        user, pw = self._ask_rdp_credentials(name)
         self._active_ops.add(did)
         self._set_btns(btn_refs, False)
         self._set_device_status(status_lbl, "WoL senden...", C["yellow"])
@@ -2039,25 +2064,28 @@ class VPNApp(QMainWindow):
                     log(f"'{name}' bereit!")
                     self.sig.device_status_signal.emit(status_lbl, "Online", C["green"])
                     time.sleep(3)
-                    self.sig.trigger_rdp_signal.emit(ip, name, btn_refs, status_lbl)
+                    self.sig.trigger_rdp_signal.emit(ip, name, btn_refs, status_lbl,
+                                                     user or "", pw or "")
                     return
 
                 log(f"'{name}' nicht erreichbar.", "warning")
                 self.sig.device_status_signal.emit(status_lbl, "Timeout", C["red"])
                 self.sig.btns_state_signal.emit(btn_refs, True)
-                self.sig.ask_rdp_signal.emit(ip, name, btn_refs, status_lbl)
+                self.sig.ask_rdp_signal.emit(ip, name, btn_refs, status_lbl,
+                                              user or "", pw or "")
             finally:
                 self._active_ops.discard(did)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _ask_rdp_anyway(self, ip, name, btn_refs, status_lbl):
+    def _ask_rdp_anyway(self, ip, name, btn_refs, status_lbl, user="", pw=""):
         reply = QMessageBox.question(
             self, "Timeout",
             f"'{name}' antwortet nicht.\nRDP trotzdem starten?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
-            self._on_rdp(ip, name, btn_refs, status_lbl)
+            self._on_rdp(ip, name, btn_refs, status_lbl,
+                         username=user or None, password=pw or None)
 
     # ── Duration Timer ──────────────────────────────────────────────────────
 
@@ -2326,11 +2354,20 @@ class VPNApp(QMainWindow):
                 C["dim"], C["yellow"]))
         self._save_favorites()
 
-    # ── RDP-Benutzername Dialog ────────────────────────────────────────────
+    # ── RDP-Credentials Dialog ────────────────────────────────────────────
 
-    def _ask_rdp_user(self, device_name: str) -> Optional[str]:
-        """Dialog zum Eingeben/Bestätigen des RDP-Benutzernamens."""
-        saved = self._rdp_users.get(device_name, "")
+    def _ask_rdp_credentials(self, device_name: str) -> tuple:
+        """Dialog zum Eingeben/Bestätigen von Benutzername und Passwort für RDP.
+        Gibt (username, password) zurück. Beide können None sein."""
+        saved_user = self._rdp_users.get(device_name, "")
+        saved_pw_b64 = self._rdp_passwords.get(device_name, "")
+        saved_pw = ""
+        if saved_pw_b64:
+            try:
+                saved_pw = base64.b64decode(saved_pw_b64.encode("ascii")).decode("utf-8")
+            except Exception:
+                saved_pw = ""
+
         dlg = QDialog(self)
         dlg.setWindowTitle(f"RDP – {device_name}")
         dlg.setStyleSheet(f"background-color: {C['card']}; color: {C['fg']};")
@@ -2338,7 +2375,7 @@ class VPNApp(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        user_edit = QLineEdit(saved)
+        user_edit = QLineEdit(saved_user)
         user_edit.setPlaceholderText("domain\\benutzername oder benutzername")
         user_edit.setStyleSheet(f"""
             QLineEdit {{
@@ -2348,8 +2385,14 @@ class VPNApp(QMainWindow):
         """)
         layout.addRow(QLabel("Benutzername:"), user_edit)
 
-        chk_save = QCheckBox("Benutzername merken")
-        chk_save.setChecked(bool(saved))
+        pw_edit = QLineEdit(saved_pw)
+        pw_edit.setPlaceholderText("Passwort (optional)")
+        pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        pw_edit.setStyleSheet(user_edit.styleSheet())
+        layout.addRow(QLabel("Passwort:"), pw_edit)
+
+        chk_save = QCheckBox("Zugangsdaten merken")
+        chk_save.setChecked(bool(saved_user or saved_pw))
         chk_save.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
         layout.addRow("", chk_save)
 
@@ -2364,17 +2407,28 @@ class VPNApp(QMainWindow):
         layout.addRow(btns)
 
         if dlg.exec() != QDialog.DialogCode.Accepted:
-            return None
+            return None, None
 
         user = user_edit.text().strip()
-        if chk_save.isChecked() and user:
-            self._rdp_users[device_name] = user
-            self._save_favorites()
-        elif not chk_save.isChecked() and device_name in self._rdp_users:
-            del self._rdp_users[device_name]
-            self._save_favorites()
+        pw = pw_edit.text()   # Passwort nicht strippen (Leerzeichen erlaubt)
 
-        return user or None
+        if chk_save.isChecked():
+            if user:
+                self._rdp_users[device_name] = user
+            elif device_name in self._rdp_users:
+                del self._rdp_users[device_name]
+            if pw:
+                self._rdp_passwords[device_name] = base64.b64encode(
+                    pw.encode("utf-8")).decode("ascii")
+            elif device_name in self._rdp_passwords:
+                del self._rdp_passwords[device_name]
+        else:
+            # "Merken" abgewählt → gespeicherte Daten löschen
+            self._rdp_users.pop(device_name, None)
+            self._rdp_passwords.pop(device_name, None)
+
+        self._save_favorites()
+        return user or None, pw or None
 
     # ── System Tray ───────────────────────────────────────────────────────
 
