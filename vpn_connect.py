@@ -1067,8 +1067,8 @@ class VPNApp(QMainWindow):
             lambda t: self.btn_update.setText(t))
         self.sig.update_failed_signal.connect(self._on_update_failed)
         self.sig.apply_update_signal.connect(self._apply_update)
-        self.sig.device_status_signal.connect(self._set_device_status_slot)
-        self.sig.btns_state_signal.connect(self._set_btns_slot)
+        self.sig.device_status_signal.connect(self._set_device_status)
+        self.sig.btns_state_signal.connect(self._set_btns)
         self.sig.trigger_rdp_signal.connect(
             lambda ip, name, bl, sl, u, pw: self._on_rdp(ip, name, bl, sl, username=u, password=pw))
         self.sig.ask_rdp_signal.connect(self._ask_rdp_anyway)
@@ -2076,23 +2076,31 @@ class VPNApp(QMainWindow):
 
     _CRED_FILE = os.path.join(_base_dir, "vpn_settings.json")
 
+    def _read_settings_file(self) -> dict:
+        """Settings-Datei lesen. Gibt {} zurück bei Fehler oder fehlender Datei."""
+        try:
+            if os.path.exists(self._CRED_FILE):
+                with open(self._CRED_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _write_settings_file(self, data: dict) -> None:
+        """Settings-Datei atomar schreiben."""
+        tmp = self._CRED_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, self._CRED_FILE)
+
     def _save_settings(self):
         """Alle Einstellungen atomar in eine Datei speichern."""
         if getattr(self, '_loading', False):
             return
-        # Laufende Einstellungen aus UI lesen
         u = self.entry_user.text().strip()
         p = self.entry_pass.text().strip()
         try:
-            # Bestehende Daten laden um History/andere Keys zu erhalten
-            data: dict = {}
-            if os.path.exists(self._CRED_FILE):
-                try:
-                    with open(self._CRED_FILE, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                except Exception:
-                    data = {}
-
+            data = self._read_settings_file()
             data.update({
                 "v": 2,
                 "user": u,
@@ -2106,38 +2114,17 @@ class VPNApp(QMainWindow):
                 "target_ip": self.entry_target_ip.text().strip(),
                 "target_port": int(self.entry_target_port.text().strip() or TARGET_PORT),
             })
-
-            # Atomar schreiben: erst in .tmp, dann umbenennen
-            tmp = self._CRED_FILE + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            # os.replace ist atomar auf Windows (überschreibt bestehende Datei)
-            os.replace(tmp, self._CRED_FILE)
-
+            self._write_settings_file(data)
         except OSError:
             pass
 
-    def _schedule_save(self):
-        """Verzögertes Speichern (Debounce 300 ms) – für häufige Änderungen."""
-        self._save_timer.start()  # restart bei jedem Aufruf
-
-    def _save_credentials(self, user: str, pw: str):
-        """Credentials setzen und sofort speichern."""
-        self.entry_user.setText(user)
-        self.entry_pass.setText(pw)
-        self._save_settings()
-
-    def _save_favorites(self):
-        """Favoriten/RDP-User speichern – nutzt die zentrale Speicherfunktion."""
-        self._save_settings()
-
     def _load_credentials(self):
         self._loading = True
+        _auto_connect = False
         try:
-            if not os.path.exists(self._CRED_FILE):
+            d = self._read_settings_file()
+            if not d:
                 return
-            with open(self._CRED_FILE, "r", encoding="utf-8") as f:
-                d = json.load(f)
 
             self.entry_user.setText(d.get("user", ""))
 
@@ -2262,7 +2249,7 @@ class VPNApp(QMainWindow):
                     self.sig.show_devices_signal.emit(devs)
                     self.sig.logged_in_signal.emit()
                     # Credentials speichern (muss im Main-Thread)
-                    QTimer.singleShot(0, lambda: self._save_credentials(u, p))
+                    QTimer.singleShot(0, self._save_settings)
                     QTimer.singleShot(0, self._start_auto_refresh)
                 else:
                     self.sig.enable_login_signal.emit()
@@ -2468,31 +2455,15 @@ class VPNApp(QMainWindow):
 
     # ── Device-Status Hilfsfunktionen ──────────────────────────────────────
 
-    def _set_device_status_slot(self, lbl, text: str, color: str):
-        """Slot für thread-safe Status-Update."""
-        try:
-            lbl.setText(text)
-            lbl.setStyleSheet(
-                f"color: {color}; font-size: 8pt; font-weight: bold;")
-        except RuntimeError:
-            pass
-
     @staticmethod
     def _set_device_status(status_lbl: QLabel, text: str, color: str):
-        """Direkt im Main-Thread aufrufen."""
+        """Thread-safe Status-Update (Slot + direkt aufrufbar)."""
         try:
             status_lbl.setText(text)
             status_lbl.setStyleSheet(
-                f"color: {color}; font-size: 8pt; font-weight: bold;")
+                f"color: {color}; font-size: 8pt; font-weight: 600;")
         except RuntimeError:
             pass
-
-    def _set_btns_slot(self, btn_refs: list, enabled: bool):
-        for b in btn_refs:
-            try:
-                b.setEnabled(enabled)
-            except RuntimeError:
-                pass
 
     @staticmethod
     def _set_btns(btn_refs: list, enabled: bool):
@@ -2816,7 +2787,7 @@ class VPNApp(QMainWindow):
     # ── Verbindungshistorie ───────────────────────────────────────────────
 
     def _add_history_entry(self, config: str, start_ts: float, duration_s: int):
-        """Verbindung in den Verlauf eintragen."""
+        """Verbindung in den Verlauf eintragen (atomares Schreiben)."""
         import datetime
         entry = {
             "config": config,
@@ -2824,16 +2795,11 @@ class VPNApp(QMainWindow):
             "duration_s": duration_s,
         }
         try:
-            path = self._CRED_FILE
-            data: dict = {}
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+            data = self._read_settings_file()
             hist = data.get("history", [])
             hist.insert(0, entry)
-            data["history"] = hist[:20]  # max 20 Einträge
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            data["history"] = hist[:20]
+            self._write_settings_file(data)
             self.sig.history_updated_signal.emit()
         except Exception:
             pass
@@ -2851,17 +2817,12 @@ class VPNApp(QMainWindow):
 
     def _refresh_history_ui(self):
         """History-Liste neu aufbauen."""
-        # Alte Widgets entfernen
         while self.history_list_layout.count():
             w = self.history_list_layout.takeAt(0).widget()
             if w:
                 w.deleteLater()
         try:
-            if not os.path.exists(self._CRED_FILE):
-                return
-            with open(self._CRED_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            hist = data.get("history", [])
+            hist = self._read_settings_file().get("history", [])
             if not hist:
                 lbl = QLabel("Kein Verlauf vorhanden.")
                 lbl.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
@@ -2870,38 +2831,27 @@ class VPNApp(QMainWindow):
             for entry in hist:
                 d = entry.get("duration_s", 0)
                 h, m, s = d // 3600, (d % 3600) // 60, d % 60
-                dur_str = f"{h:02d}:{m:02d}:{s:02d}"
-                text = f"{entry.get('start','?')}  •  {entry.get('config','?')}  •  {dur_str}"
+                text = (f"{entry.get('start','?')}  ·  "
+                        f"{entry.get('config','?')}  ·  "
+                        f"{h:02d}:{m:02d}:{s:02d}")
                 row = QLabel(text)
-                row.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; padding: 4px 6px; border-radius: 3px;")
+                row.setStyleSheet(
+                    f"color: {C['dim']}; font-size: 9pt; padding: 4px 6px; border-radius: 3px;")
                 self.history_list_layout.addWidget(row)
         except Exception:
             pass
 
     def _clear_history(self):
         try:
-            if os.path.exists(self._CRED_FILE):
-                with open(self._CRED_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                data["history"] = []
-                with open(self._CRED_FILE, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
+            data = self._read_settings_file()
+            data["history"] = []
+            self._write_settings_file(data)
             self._refresh_history_ui()
         except Exception:
             pass
 
     # ── Favoriten ─────────────────────────────────────────────────────────
 
-    def _load_favorites_and_rdp_users(self):
-        """Favoriten und RDP-Benutzernamen aus Settings laden."""
-        try:
-            if os.path.exists(self._CRED_FILE):
-                with open(self._CRED_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self._favorites = data.get("favorites", [])
-                self._rdp_users = data.get("rdp_users", {})
-        except Exception:
-            pass
 
     def _toggle_favorite(self, device_id: str, star_btn: QPushButton):
         if device_id in self._favorites:
@@ -2914,7 +2864,7 @@ class VPNApp(QMainWindow):
             star_btn.setText("★")
             star_btn.setStyleSheet(star_btn.styleSheet().replace(
                 C["dim"], C["yellow"]))
-        self._save_favorites()
+        self._save_settings()
 
     # ── RDP-Credentials Dialog ────────────────────────────────────────────
 
@@ -2989,7 +2939,7 @@ class VPNApp(QMainWindow):
             self._rdp_users.pop(device_name, None)
             self._rdp_passwords.pop(device_name, None)
 
-        self._save_favorites()
+        self._save_settings()
         return user or None, pw or None
 
     # ── System Tray ───────────────────────────────────────────────────────
