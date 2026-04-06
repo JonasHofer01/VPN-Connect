@@ -32,7 +32,8 @@ APP_VERSION = "1.7.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
-TARGET_IP = "192.168.178.5"
+# IP und Port werden aus vpn_settings.json geladen (nicht hardcodiert)
+TARGET_IP = ""
 TARGET_PORT = 8090
 
 WG_CONFIG_CONTENT = ""
@@ -1133,6 +1134,45 @@ class VPNApp(QMainWindow):
         main_layout.addWidget(wg_card)
         main_layout.addSpacing(16)
 
+        # ── Server / Ziel-Einstellungen ──
+        srv_header = QLabel("SERVER / ZIEL")
+        srv_header.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        srv_header.setStyleSheet(f"color: {C['dim']};")
+        main_layout.addWidget(srv_header)
+        main_layout.addSpacing(6)
+
+        srv_card = QFrame()
+        srv_card.setStyleSheet(f"QFrame {{ background-color: {C['card']}; border-radius: 8px; }}")
+        srv_layout = QHBoxLayout(srv_card)
+        srv_layout.setContentsMargins(14, 10, 14, 10)
+        srv_layout.setSpacing(8)
+
+        lbl_ip = QLabel("IP / Hostname:")
+        lbl_ip.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        srv_layout.addWidget(lbl_ip)
+
+        self.entry_target_ip = QLineEdit()
+        self.entry_target_ip.setPlaceholderText("z.B. 192.168.1.10")
+        self.entry_target_ip.setFixedWidth(180)
+        self.entry_target_ip.editingFinished.connect(self._apply_server_settings)
+        srv_layout.addWidget(self.entry_target_ip)
+
+        srv_layout.addSpacing(10)
+
+        lbl_port = QLabel("Port:")
+        lbl_port.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        srv_layout.addWidget(lbl_port)
+
+        self.entry_target_port = QLineEdit()
+        self.entry_target_port.setPlaceholderText("8090")
+        self.entry_target_port.setFixedWidth(70)
+        self.entry_target_port.editingFinished.connect(self._apply_server_settings)
+        srv_layout.addWidget(self.entry_target_port)
+
+        srv_layout.addStretch()
+        main_layout.addWidget(srv_card)
+        main_layout.addSpacing(16)
+
         # ── UpSnap Sektion ──
         snap_header = QLabel("UPSNAP  /  WAKE ON LAN")
         snap_header.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
@@ -1595,6 +1635,8 @@ class VPNApp(QMainWindow):
                 "favorites": self._favorites,
                 "rdp_users": self._rdp_users,
                 "rdp_passwords": self._rdp_passwords,
+                "target_ip": self.entry_target_ip.text().strip(),
+                "target_port": int(self.entry_target_port.text().strip() or TARGET_PORT),
             })
 
             # Atomar schreiben: erst in .tmp, dann umbenennen
@@ -1654,12 +1696,38 @@ class VPNApp(QMainWindow):
             self._rdp_users = d.get("rdp_users", {})
             self._rdp_passwords = d.get("rdp_passwords", {})
 
+            # Server IP + Port laden und anwenden
+            saved_ip = d.get("target_ip", "")
+            saved_port = d.get("target_port", TARGET_PORT)
+            if saved_ip:
+                self.entry_target_ip.setText(saved_ip)
+            self.entry_target_port.setText(str(saved_port))
+            self._apply_server_settings(save=False)
+
             # Auto-Connect beim Start
             if d.get("auto_connect", False) and self.configs:
                 QTimer.singleShot(800, self._on_connect)
 
         except Exception:
             pass
+
+    def _apply_server_settings(self, save: bool = True):
+        """IP + Port aus den Feldern übernehmen und global setzen."""
+        global TARGET_IP, TARGET_PORT
+        ip = self.entry_target_ip.text().strip()
+        port_txt = self.entry_target_port.text().strip()
+        try:
+            port = int(port_txt) if port_txt else TARGET_PORT
+        except ValueError:
+            port = TARGET_PORT
+        TARGET_IP = ip
+        TARGET_PORT = port
+        # Browser-Button nur aktiv wenn IP gesetzt und verbunden
+        if hasattr(self, 'btn_browser'):
+            self.btn_browser.setEnabled(
+                self.vpn_connected and bool(TARGET_IP))
+        if save:
+            self._save_settings()
 
     # ── Auto-Refresh ───────────────────────────────────────────────────────
 

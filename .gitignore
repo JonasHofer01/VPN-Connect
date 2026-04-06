@@ -27,6 +27,11 @@ pip_out.txt
 *.conf
 *.conf.dpapi
 
+# Lokale Einstellungen / Zugangsdaten (NIE committen!)
+vpn_settings.json
+vpn_settings.json.tmp
+*.log
+
 # OS
 Thumbs.db
 Desktop.ini
