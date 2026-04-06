@@ -868,6 +868,12 @@ class VPNApp(QMainWindow):
         self._devices_hash: str = ""           # Hash der Geräteliste (Smart-Refresh)
         self._active_ops: set = set()          # Device-IDs mit laufenden Operationen
 
+        # Debounce-Timer für Settings (verhindert zu häufiges Schreiben bei schnellen Änderungen)
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(300)
+        self._save_timer.timeout.connect(self._save_settings)
+
         # Connection duration
         self._connect_time: float = 0
         self._duration_timer = QTimer(self)
@@ -1040,6 +1046,7 @@ class VPNApp(QMainWindow):
         self.config_listbox.setMaximumHeight(80)
         self.config_listbox.itemDoubleClicked.connect(
             lambda: self._on_connect() if not self.vpn_connected else None)
+        self.config_listbox.currentRowChanged.connect(lambda: self._save_settings())
         wg_layout.addWidget(self.config_listbox)
 
         btn_row = QHBoxLayout()
@@ -1081,6 +1088,7 @@ class VPNApp(QMainWindow):
                 background: {C['accent']};
             }}
         """)
+        self.chk_auto_reconnect.stateChanged.connect(lambda: self._save_settings())
         wg_layout.addWidget(self.chk_auto_reconnect)
 
         # Auto-Connect beim Start Checkbox
@@ -1097,6 +1105,7 @@ class VPNApp(QMainWindow):
                 background: {C['accent']};
             }}
         """)
+        self.chk_auto_connect.stateChanged.connect(lambda: self._save_settings())
         wg_layout.addWidget(self.chk_auto_connect)
 
         main_layout.addWidget(wg_card)
@@ -1126,6 +1135,7 @@ class VPNApp(QMainWindow):
         self.entry_user = QLineEdit()
         self.entry_user.setFixedWidth(180)
         self.entry_user.returnPressed.connect(lambda: self.entry_pass.setFocus())
+        self.entry_user.editingFinished.connect(lambda: self._save_settings())
         login_row.addWidget(self.entry_user)
 
         login_row.addSpacing(6)
@@ -1137,6 +1147,7 @@ class VPNApp(QMainWindow):
         self.entry_pass.setFixedWidth(140)
         self.entry_pass.setEchoMode(QLineEdit.EchoMode.Password)
         self.entry_pass.returnPressed.connect(self._on_upsnap_login)
+        self.entry_pass.editingFinished.connect(lambda: self._save_settings())
         login_row.addWidget(self.entry_pass)
 
         login_row.addSpacing(6)
@@ -1531,18 +1542,20 @@ class VPNApp(QMainWindow):
     _CRED_FILE = os.path.join(_base_dir, "vpn_settings.json")
 
     def _save_settings(self):
-        """Alle Einstellungen in eine Datei speichern."""
+        """Alle Einstellungen atomar in eine Datei speichern."""
+        # Laufende Einstellungen aus UI lesen
         u = self.entry_user.text().strip()
         p = self.entry_pass.text().strip()
         try:
-            # Bestehende Daten laden (History usw. erhalten)
-            data = {}
+            # Bestehende Daten laden um History/andere Keys zu erhalten
+            data: dict = {}
             if os.path.exists(self._CRED_FILE):
                 try:
                     with open(self._CRED_FILE, "r", encoding="utf-8") as f:
                         data = json.load(f)
                 except Exception:
                     data = {}
+
             data.update({
                 "v": 2,
                 "user": u,
@@ -1553,14 +1566,29 @@ class VPNApp(QMainWindow):
                 "favorites": self._favorites,
                 "rdp_users": self._rdp_users,
             })
-            with open(self._CRED_FILE, "w", encoding="utf-8") as f:
+
+            # Atomar schreiben: erst in .tmp, dann umbenennen
+            tmp = self._CRED_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+            # os.replace ist atomar auf Windows (überschreibt bestehende Datei)
+            os.replace(tmp, self._CRED_FILE)
+
         except OSError:
             pass
 
+    def _schedule_save(self):
+        """Verzögertes Speichern (Debounce 300 ms) – für häufige Änderungen."""
+        self._save_timer.start()  # restart bei jedem Aufruf
+
     def _save_credentials(self, user: str, pw: str):
+        """Credentials setzen und sofort speichern."""
         self.entry_user.setText(user)
         self.entry_pass.setText(pw)
+        self._save_settings()
+
+    def _save_favorites(self):
+        """Favoriten/RDP-User speichern – nutzt die zentrale Speicherfunktion."""
         self._save_settings()
 
     def _load_credentials(self):
@@ -2234,19 +2262,6 @@ class VPNApp(QMainWindow):
         except Exception:
             pass
 
-    def _save_favorites(self):
-        try:
-            data = {}
-            if os.path.exists(self._CRED_FILE):
-                with open(self._CRED_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            data["favorites"] = self._favorites
-            data["rdp_users"] = self._rdp_users
-            with open(self._CRED_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-        except Exception:
-            pass
-
     def _toggle_favorite(self, device_id: str, star_btn: QPushButton):
         if device_id in self._favorites:
             self._favorites.remove(device_id)
@@ -2378,6 +2393,7 @@ class VPNApp(QMainWindow):
     def closeEvent(self, event):
         # Bei verbundenem VPN: In Tray minimieren statt schließen
         if self.vpn_connected and self._tray and self._tray.isVisible():
+            self._save_settings()       # ← Settings sofort sichern vor dem Verstecken
             self.hide()
             self._tray.showMessage(
                 "VPN Connect",
