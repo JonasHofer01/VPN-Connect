@@ -1612,6 +1612,8 @@ class VPNApp(QMainWindow):
 
     def _save_settings(self):
         """Alle Einstellungen atomar in eine Datei speichern."""
+        if getattr(self, '_loading', False):
+            return
         # Laufende Einstellungen aus UI lesen
         u = self.entry_user.text().strip()
         p = self.entry_pass.text().strip()
@@ -1664,6 +1666,7 @@ class VPNApp(QMainWindow):
         self._save_settings()
 
     def _load_credentials(self):
+        self._loading = True
         try:
             if not os.path.exists(self._CRED_FILE):
                 return
@@ -1705,11 +1708,15 @@ class VPNApp(QMainWindow):
             self._apply_server_settings(save=False)
 
             # Auto-Connect beim Start
-            if d.get("auto_connect", False) and self.configs:
-                QTimer.singleShot(800, self._on_connect)
+            _auto_connect = d.get("auto_connect", False) and bool(self.configs)
 
         except Exception:
-            pass
+            _auto_connect = False
+        finally:
+            self._loading = False
+
+        if _auto_connect:
+            QTimer.singleShot(800, self._on_connect)
 
     def _apply_server_settings(self, save: bool = True):
         """IP + Port aus den Feldern übernehmen und global setzen."""
