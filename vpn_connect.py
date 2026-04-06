@@ -28,7 +28,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.8.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -679,23 +679,30 @@ def _cleanup_old_exe():
 
 
 # =============================================================================
-#  FARBSCHEMA
+#  FARBSCHEMA  –  Windows 11 Fluent Design (Dark)
 # =============================================================================
 
 C = {
-    "bg":       "#0f0f17",
-    "card":     "#1a1a2e",
-    "surface":  "#242438",
-    "border":   "#2d2d44",
-    "fg":       "#e2e2ef",
-    "dim":      "#6e6e8a",
-    "accent":   "#6c63ff",
-    "accent_h": "#857dff",
-    "green":    "#4ade80",
-    "red":      "#f87171",
-    "yellow":   "#fbbf24",
-    "orange":   "#fb923c",
-    "cyan":     "#22d3ee",
+    # Hintergründe (Layering)
+    "bg":        "#202020",   # App-Hintergrund (Mica-Basis)
+    "card":      "#2B2B2B",   # Karte / erste Ebene
+    "surface":   "#3A3A3A",   # Control-Füllung (Standard)
+    "surface_h": "#444444",   # Control-Füllung (Hover)
+    # Rahmen
+    "border":    "#454545",   # Subtiler Rahmen
+    "border_l":  "#5C5C5C",   # Heller Rahmen (Hover/Focus)
+    # Text
+    "fg":        "#FFFFFF",   # Primärtext
+    "dim":       "#9D9D9D",   # Sekundärtext
+    # System-Akzentfarbe (Win11 dark mode blau)
+    "accent":    "#60CDFF",
+    "accent_h":  "#99EBFF",
+    # Semantische Farben
+    "green":     "#6CCB5F",
+    "red":       "#FF6B6B",
+    "yellow":    "#FCE100",
+    "orange":    "#FF8C00",
+    "cyan":      "#60CDFF",
 }
 
 # =============================================================================
@@ -708,22 +715,28 @@ QMainWindow {{
 }}
 QWidget {{
     color: {C['fg']};
-    font-family: 'Segoe UI';
+    font-family: 'Segoe UI Variable Text', 'Segoe UI';
     font-size: 10pt;
+    background-color: transparent;
 }}
 QScrollArea {{
     background-color: {C['bg']};
     border: none;
 }}
+/* Scrollbar – Win11-Stil: schmal, transparent */
 QScrollBar:vertical {{
-    background: {C['card']};
-    width: 8px;
+    background: transparent;
+    width: 10px;
+    margin: 2px;
     border: none;
 }}
 QScrollBar::handle:vertical {{
-    background: {C['surface']};
+    background: rgba(255,255,255,0.18);
     min-height: 30px;
-    border-radius: 4px;
+    border-radius: 5px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: rgba(255,255,255,0.32);
 }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0px;
@@ -731,56 +744,128 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
 QLabel {{
     background: transparent;
 }}
+/* Eingabefelder */
 QLineEdit {{
     background-color: {C['surface']};
     color: {C['fg']};
     border: 1px solid {C['border']};
     border-radius: 4px;
-    padding: 5px 8px;
-    font-size: 10pt;
+    padding: 6px 10px;
+    selection-background-color: {C['accent']};
+    selection-color: #000000;
+}}
+QLineEdit:hover {{
+    border: 1px solid {C['border_l']};
+    background-color: {C['surface_h']};
 }}
 QLineEdit:focus {{
     border: 1px solid {C['accent']};
+    background-color: {C['surface_h']};
 }}
+QLineEdit::placeholder {{
+    color: {C['dim']};
+}}
+/* Listen */
 QListWidget {{
     background-color: {C['surface']};
     color: {C['fg']};
-    border: none;
+    border: 1px solid {C['border']};
     border-radius: 4px;
-    padding: 4px;
-    font-size: 10pt;
+    padding: 2px;
     outline: none;
 }}
 QListWidget::item {{
-    padding: 4px 8px;
+    padding: 6px 10px;
     border-radius: 3px;
 }}
 QListWidget::item:selected {{
-    background-color: {C['accent']};
-    color: #ffffff;
+    background-color: rgba(96,205,255,0.22);
+    color: {C['fg']};
+    border-left: 2px solid {C['accent']};
 }}
-QListWidget::item:hover {{
-    background-color: {C['border']};
+QListWidget::item:hover:!selected {{
+    background-color: rgba(255,255,255,0.06);
 }}
+/* Log-Textfeld */
 QTextEdit {{
-    background-color: {C['surface']};
+    background-color: {C['card']};
     color: {C['dim']};
-    border: none;
+    border: 1px solid {C['border']};
     border-radius: 4px;
     padding: 6px;
-    font-family: 'Consolas';
+    font-family: 'Cascadia Code', 'Consolas';
     font-size: 9pt;
+    selection-background-color: {C['accent']};
+    selection-color: #000000;
 }}
+/* Schaltflächen (Basis – wird meist durch _make_btn überschrieben) */
 QPushButton {{
-    border: none;
     border-radius: 4px;
-    padding: 7px 14px;
-    font-weight: bold;
+    padding: 7px 16px;
     font-size: 9pt;
+    font-family: 'Segoe UI Variable Text', 'Segoe UI';
+    font-weight: 600;
 }}
 QPushButton:disabled {{
     background-color: {C['surface']};
-    color: {C['dim']};
+    color: rgba(255,255,255,0.36);
+    border: 1px solid {C['border']};
+}}
+/* Checkboxen – Win11-Stil */
+QCheckBox {{
+    color: {C['fg']};
+    font-size: 9pt;
+    spacing: 8px;
+}}
+QCheckBox::indicator {{
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    border: 1px solid {C['border_l']};
+    background: transparent;
+}}
+QCheckBox::indicator:hover {{
+    border: 1px solid {C['accent']};
+    background: rgba(96,205,255,0.08);
+}}
+QCheckBox::indicator:checked {{
+    background-color: {C['accent']};
+    border: 1px solid {C['accent']};
+    image: none;
+}}
+QCheckBox::indicator:checked:hover {{
+    background-color: {C['accent_h']};
+    border: 1px solid {C['accent_h']};
+}}
+/* Dialoge */
+QDialog {{
+    background-color: {C['card']};
+}}
+QMessageBox {{
+    background-color: {C['card']};
+}}
+QDialogButtonBox QPushButton {{
+    min-width: 80px;
+}}
+/* Menü (Tray) */
+QMenu {{
+    background-color: {C['card']};
+    border: 1px solid {C['border']};
+    border-radius: 8px;
+    padding: 4px;
+}}
+QMenu::item {{
+    padding: 6px 16px;
+    border-radius: 4px;
+    color: {C['fg']};
+}}
+QMenu::item:selected {{
+    background-color: rgba(255,255,255,0.08);
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {C['border']};
+    margin: 4px 8px;
 }}
 """
 
@@ -841,16 +926,41 @@ class DotWidget(QWidget):
 
 def _make_btn(text: str, bg: str, fg: str, hover: str,
               parent=None) -> QPushButton:
+    """Erstellt einen Win11-Fluent-styled Button."""
     btn = QPushButton(text, parent)
+    # Rahmen-Farbe ableiten
+    is_accent = bg in (C["accent"], C["accent_h"])
+    is_danger  = bg in (C["red"],)
+    if is_accent:
+        border_col = C["accent_h"]
+        pressed_bg = "rgba(96,205,255,0.65)"
+    elif is_danger:
+        border_col = "#FF8C8C"
+        pressed_bg = "rgba(255,107,107,0.55)"
+    else:
+        border_col = C["border_l"]
+        pressed_bg = "rgba(255,255,255,0.04)"
     btn.setStyleSheet(f"""
         QPushButton {{
-            background-color: {bg}; color: {fg};
-            border: none; border-radius: 4px;
-            padding: 7px 14px; font-weight: bold; font-size: 9pt;
+            background-color: {bg};
+            color: {fg};
+            border: 1px solid {border_col};
+            border-radius: 4px;
+            padding: 6px 16px;
+            font-weight: 600;
+            font-size: 9pt;
         }}
-        QPushButton:hover {{ background-color: {hover}; }}
+        QPushButton:hover {{
+            background-color: {hover};
+            border: 1px solid {hover};
+        }}
+        QPushButton:pressed {{
+            background-color: {pressed_bg};
+        }}
         QPushButton:disabled {{
-            background-color: {C['surface']}; color: {C['dim']};
+            background-color: {C['surface']};
+            color: rgba(255,255,255,0.36);
+            border: 1px solid {C['border']};
         }}
     """)
     return btn
@@ -972,7 +1082,7 @@ class VPNApp(QMainWindow):
     # ── Layout ─────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        pad = 20
+        pad = 24
 
         # Zentrales Widget mit Scroll-Bereich
         scroll = QScrollArea()
@@ -986,6 +1096,334 @@ class VPNApp(QMainWindow):
         main_layout = QVBoxLayout(outer)
         main_layout.setContentsMargins(pad, pad, pad, pad)
         main_layout.setSpacing(0)
+
+        # ── Header ──
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(0, 0, 0, 20)
+
+        title = QLabel("VPN Connect")
+        title.setFont(QFont("Segoe UI Variable Display", 22, QFont.Weight.DemiBold))
+        title.setStyleSheet(f"color: {C['fg']}; letter-spacing: -0.5px;")
+        hdr.addWidget(title)
+
+        # Update-Button (initial versteckt)
+        self.btn_update = _make_btn("↑  Update verfügbar", C["green"], "#000000", "#8fdf81")
+        self.btn_update.clicked.connect(self._on_update)
+        self.btn_update.hide()
+        hdr.addWidget(self.btn_update)
+
+        hdr.addStretch()
+
+        # Duration Label
+        self.duration_label = QLabel("")
+        self.duration_label.setFont(QFont("Segoe UI Variable Text", 9))
+        self.duration_label.setStyleSheet(f"color: {C['dim']};")
+        self.duration_label.hide()
+        hdr.addWidget(self.duration_label)
+        hdr.addSpacing(12)
+
+        # Ping Label
+        self.ping_label = QLabel("")
+        self.ping_label.setFont(QFont("Cascadia Code", 9))
+        self.ping_label.setStyleSheet(f"color: {C['dim']};")
+        self.ping_label.hide()
+        hdr.addWidget(self.ping_label)
+        hdr.addSpacing(14)
+
+        # VPN-IP Label
+        self.vpn_ip_label = QLabel("")
+        self.vpn_ip_label.setFont(QFont("Cascadia Code", 9))
+        self.vpn_ip_label.setStyleSheet(f"color: {C['accent']};")
+        self.vpn_ip_label.setToolTip("VPN-Tunnel IP-Adresse")
+        self.vpn_ip_label.hide()
+        hdr.addWidget(self.vpn_ip_label)
+        hdr.addSpacing(14)
+
+        # Transfer-Stats Label
+        self.transfer_label = QLabel("")
+        self.transfer_label.setFont(QFont("Cascadia Code", 9))
+        self.transfer_label.setStyleSheet(f"color: {C['dim']};")
+        self.transfer_label.setToolTip("VPN Datentransfer")
+        self.transfer_label.hide()
+        hdr.addWidget(self.transfer_label)
+        hdr.addSpacing(14)
+
+        # Status-Badge
+        status_box = QHBoxLayout()
+        status_box.setSpacing(7)
+        self.status_dot = DotWidget(C["red"], size=10)
+        status_box.addWidget(self.status_dot)
+        self.status_label = QLabel("Getrennt")
+        self.status_label.setFont(QFont("Segoe UI Variable Text", 10, QFont.Weight.Medium))
+        self.status_label.setStyleSheet(f"color: {C['red']};")
+        status_box.addWidget(self.status_label)
+        hdr.addLayout(status_box)
+
+        main_layout.addLayout(hdr)
+
+        # ── WireGuard Sektion ──
+        main_layout.addWidget(self._section_label("WireGuard"))
+        main_layout.addSpacing(6)
+
+        wg_card = QFrame()
+        wg_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        wg_layout = QVBoxLayout(wg_card)
+        wg_layout.setContentsMargins(16, 14, 16, 14)
+        wg_layout.setSpacing(10)
+
+        self.config_listbox = QListWidget()
+        self.config_listbox.setMaximumHeight(88)
+        self.config_listbox.itemDoubleClicked.connect(
+            lambda: self._on_connect() if not self.vpn_connected else None)
+        self.config_listbox.currentRowChanged.connect(lambda: self._save_settings())
+        wg_layout.addWidget(self.config_listbox)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        self.btn_connect = _make_btn("  Verbinden", C["accent"], "#000000", C["accent_h"])
+        self.btn_connect.clicked.connect(self._on_connect)
+        btn_row.addWidget(self.btn_connect)
+
+        self.btn_disconnect = _make_btn("  Trennen", C["red"], "#ffffff", "#FF8C8C")
+        self.btn_disconnect.clicked.connect(self._on_disconnect)
+        self.btn_disconnect.setEnabled(False)
+        btn_row.addWidget(self.btn_disconnect)
+
+        self.btn_cancel = _make_btn("  Abbrechen", C["surface"], C["fg"], C["surface_h"])
+        self.btn_cancel.clicked.connect(self._on_cancel)
+        self.btn_cancel.hide()
+        btn_row.addWidget(self.btn_cancel)
+
+        self.btn_browser = _make_btn("  Im Browser öffnen", C["surface"], C["fg"], C["surface_h"])
+        self.btn_browser.clicked.connect(self._on_open_browser)
+        self.btn_browser.setEnabled(False)
+        btn_row.addWidget(self.btn_browser)
+
+        btn_row.addStretch()
+        wg_layout.addLayout(btn_row)
+
+        chk_qss = f"""
+            QCheckBox {{ color: {C['dim']}; font-size: 9pt; spacing: 8px; }}
+            QCheckBox::indicator {{
+                width: 16px; height: 16px; border-radius: 3px;
+                border: 1px solid {C['border_l']}; background: transparent;
+            }}
+            QCheckBox::indicator:hover {{
+                border: 1px solid {C['accent']}; background: rgba(96,205,255,0.08);
+            }}
+            QCheckBox::indicator:checked {{
+                background: {C['accent']}; border: 1px solid {C['accent']};
+            }}
+        """
+
+        self.chk_auto_reconnect = QCheckBox("Auto-Reconnect bei Verbindungsverlust")
+        self.chk_auto_reconnect.setStyleSheet(chk_qss)
+        self.chk_auto_reconnect.stateChanged.connect(lambda: self._save_settings())
+        wg_layout.addWidget(self.chk_auto_reconnect)
+
+        self.chk_auto_connect = QCheckBox("Automatisch verbinden beim Start")
+        self.chk_auto_connect.setStyleSheet(chk_qss)
+        self.chk_auto_connect.stateChanged.connect(lambda: self._save_settings())
+        wg_layout.addWidget(self.chk_auto_connect)
+
+        main_layout.addWidget(wg_card)
+        main_layout.addSpacing(16)
+
+        # ── Server / Ziel ──
+        main_layout.addWidget(self._section_label("Server / Ziel"))
+        main_layout.addSpacing(6)
+
+        srv_card = QFrame()
+        srv_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        srv_layout = QHBoxLayout(srv_card)
+        srv_layout.setContentsMargins(16, 12, 16, 12)
+        srv_layout.setSpacing(10)
+
+        lbl_ip = QLabel("IP / Hostname")
+        lbl_ip.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        srv_layout.addWidget(lbl_ip)
+
+        self.entry_target_ip = QLineEdit()
+        self.entry_target_ip.setPlaceholderText("z. B. 192.168.1.10")
+        self.entry_target_ip.setFixedWidth(190)
+        self.entry_target_ip.editingFinished.connect(self._apply_server_settings)
+        srv_layout.addWidget(self.entry_target_ip)
+
+        srv_layout.addSpacing(12)
+
+        lbl_port = QLabel("Port")
+        lbl_port.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        srv_layout.addWidget(lbl_port)
+
+        self.entry_target_port = QLineEdit()
+        self.entry_target_port.setPlaceholderText("8090")
+        self.entry_target_port.setFixedWidth(72)
+        self.entry_target_port.editingFinished.connect(self._apply_server_settings)
+        srv_layout.addWidget(self.entry_target_port)
+
+        srv_layout.addStretch()
+        main_layout.addWidget(srv_card)
+        main_layout.addSpacing(16)
+
+        # ── UpSnap / Wake on LAN ──
+        main_layout.addWidget(self._section_label("UpSnap  ·  Wake on LAN"))
+        main_layout.addSpacing(6)
+
+        snap_card = QFrame()
+        snap_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        snap_layout = QVBoxLayout(snap_card)
+        snap_layout.setContentsMargins(16, 14, 16, 14)
+        snap_layout.setSpacing(10)
+
+        login_row = QHBoxLayout()
+        login_row.setSpacing(8)
+
+        self.lbl_email = QLabel("E-Mail")
+        self.lbl_email.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        login_row.addWidget(self.lbl_email)
+        self.entry_user = QLineEdit()
+        self.entry_user.setFixedWidth(190)
+        self.entry_user.returnPressed.connect(lambda: self.entry_pass.setFocus())
+        self.entry_user.editingFinished.connect(lambda: self._save_settings())
+        login_row.addWidget(self.entry_user)
+
+        login_row.addSpacing(8)
+
+        self.lbl_pw = QLabel("Passwort")
+        self.lbl_pw.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        login_row.addWidget(self.lbl_pw)
+        self.entry_pass = QLineEdit()
+        self.entry_pass.setFixedWidth(150)
+        self.entry_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.entry_pass.returnPressed.connect(self._on_upsnap_login)
+        self.entry_pass.editingFinished.connect(lambda: self._save_settings())
+        login_row.addWidget(self.entry_pass)
+
+        login_row.addSpacing(8)
+
+        self.btn_login = _make_btn("Anmelden", C["accent"], "#000000", C["accent_h"])
+        self.btn_login.clicked.connect(self._on_upsnap_login)
+        login_row.addWidget(self.btn_login)
+
+        login_row.addStretch()
+        snap_layout.addLayout(login_row)
+
+        # Separator
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background-color: {C['border']}; border: none;")
+        snap_layout.addWidget(sep)
+
+        # Geräte-Info-Zeile
+        self.device_info_label = QLabel("")
+        self.device_info_label.setStyleSheet(f"color: {C['dim']}; font-size: 8pt;")
+        self.device_info_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.device_info_label.hide()
+        snap_layout.addWidget(self.device_info_label)
+
+        # Device-Bereich
+        self.device_frame = QVBoxLayout()
+        self.device_frame.setSpacing(4)
+        self.upsnap_hint = QLabel("Anmelden, um Geräte anzuzeigen")
+        self.upsnap_hint.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; padding: 8px 0;")
+        self.upsnap_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.device_frame.addWidget(self.upsnap_hint)
+        snap_layout.addLayout(self.device_frame)
+
+        main_layout.addWidget(snap_card)
+        main_layout.addSpacing(12)
+
+        # ── Log (Expander) ──
+        self.log_toggle = QPushButton("›  Protokoll")
+        self.log_toggle.setStyleSheet(self._expander_btn_qss())
+        self.log_toggle.clicked.connect(self._toggle_log)
+        main_layout.addWidget(self.log_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.log_frame = QFrame()
+        self.log_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 6px;
+            }}
+        """)
+        log_layout = QVBoxLayout(self.log_frame)
+        log_layout.setContentsMargins(10, 10, 10, 10)
+
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setFont(QFont("Cascadia Code", 9))
+        self.log_text.setMaximumHeight(200)
+        log_layout.addWidget(self.log_text)
+
+        self.log_frame.hide()
+        main_layout.addWidget(self.log_frame)
+        main_layout.addSpacing(4)
+
+        # ── Verbindungshistorie (Expander) ──
+        self.history_toggle = QPushButton("›  Verbindungshistorie")
+        self.history_toggle.setStyleSheet(self._expander_btn_qss())
+        self.history_toggle.clicked.connect(self._toggle_history)
+        main_layout.addWidget(self.history_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.history_frame = QFrame()
+        self.history_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 6px;
+            }}
+        """)
+        hist_layout = QVBoxLayout(self.history_frame)
+        hist_layout.setContentsMargins(10, 10, 10, 10)
+        hist_layout.setSpacing(4)
+        self.history_list_widget = QWidget()
+        self.history_list_layout = QVBoxLayout(self.history_list_widget)
+        self.history_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_list_layout.setSpacing(2)
+        hist_layout.addWidget(self.history_list_widget)
+        btn_clear_hist = QPushButton("Verlauf leeren")
+        btn_clear_hist.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C['dim']};
+                border: none; font-size: 8pt; padding: 2px;
+                text-align: right;
+            }}
+            QPushButton:hover {{ color: {C['red']}; }}
+        """)
+        btn_clear_hist.clicked.connect(self._clear_history)
+        hist_layout.addWidget(btn_clear_hist, alignment=Qt.AlignmentFlag.AlignRight)
+        self.history_frame.hide()
+        main_layout.addWidget(self.history_frame)
+
+        main_layout.addStretch()
+
+        # ── Tastaturkürzel ──
+        QShortcut(QKeySequence("Ctrl+K"), self).activated.connect(
+            lambda: self._on_connect() if not self.vpn_connected else None)
+        QShortcut(QKeySequence("Ctrl+D"), self).activated.connect(
+            lambda: self._on_disconnect() if self.vpn_connected else None)
+        QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._toggle_log)
+        QShortcut(QKeySequence("Ctrl+H"), self).activated.connect(self._toggle_history)
 
         # ── Header ──
         hdr = QHBoxLayout()
@@ -1323,11 +1761,38 @@ class VPNApp(QMainWindow):
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._toggle_log)
         QShortcut(QKeySequence("Ctrl+H"), self).activated.connect(self._toggle_history)
 
+    # ── Win11 UI-Helfer ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _section_label(text: str) -> QLabel:
+        """Abschnittsüberschrift im Windows 11 Stil."""
+        lbl = QLabel(text)
+        lbl.setFont(QFont("Segoe UI Variable Text", 9, QFont.Weight.DemiBold))
+        lbl.setStyleSheet(f"color: {C['dim']}; letter-spacing: 0.3px;")
+        return lbl
+
+    @staticmethod
+    def _expander_btn_qss() -> str:
+        """QSS für aufklappbare Sektions-Buttons."""
+        return f"""
+            QPushButton {{
+                background: transparent;
+                color: {C['dim']};
+                border: none;
+                font-size: 9pt;
+                font-family: 'Segoe UI Variable Text', 'Segoe UI';
+                padding: 4px 2px;
+                text-align: left;
+            }}
+            QPushButton:hover {{ color: {C['fg']}; }}
+        """
+
     # ── Status ─────────────────────────────────────────────────────────────
 
     def _set_status(self, text: str, color: str):
         self.status_dot.set_color(color)
         self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"color: {color}; background: transparent;")
         self.status_label.setStyleSheet(f"color: {color}; background: transparent;")
 
     # ── Log ────────────────────────────────────────────────────────────────
@@ -1335,11 +1800,11 @@ class VPNApp(QMainWindow):
     def _toggle_log(self):
         if self._log_visible:
             self.log_frame.hide()
-            self.log_toggle.setText("[+] Log")
+            self.log_toggle.setText("›  Protokoll")
             self._log_visible = False
         else:
             self.log_frame.show()
-            self.log_toggle.setText("[-] Log")
+            self.log_toggle.setText("⌄  Protokoll")
             self._log_visible = True
 
     def _append_log(self, msg: str):
@@ -1884,22 +2349,30 @@ class VPNApp(QMainWindow):
         for d in devices_sorted:
             row = QFrame()
             row.setStyleSheet(f"""
-                QFrame {{ background-color: {C['surface']}; border-radius: 4px; }}
+                QFrame {{
+                    background-color: {C['surface']};
+                    border: 1px solid {C['border']};
+                    border-radius: 6px;
+                }}
+                QFrame:hover {{
+                    background-color: {C['surface_h']};
+                    border: 1px solid {C['border_l']};
+                }}
             """)
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(12, 7, 12, 7)
-            row_layout.setSpacing(8)
+            row_layout.setContentsMargins(14, 8, 10, 8)
+            row_layout.setSpacing(10)
 
             name  = d.get("name", "?")
             ip    = d.get("ip", "?")
             online = d.get("status") == "online"
             dot_c  = C["green"] if online else C["dim"]
 
-            dot = DotWidget(dot_c, 10)
+            dot = DotWidget(dot_c, 9)
             row_layout.addWidget(dot)
 
             name_lbl = QLabel(name)
-            name_lbl.setStyleSheet(f"color: {C['fg']}; font-size: 10pt;")
+            name_lbl.setStyleSheet(f"color: {C['fg']}; font-size: 10pt; font-weight: 600;")
             row_layout.addWidget(name_lbl)
 
             ip_lbl = QLabel(ip)
@@ -1912,9 +2385,9 @@ class VPNApp(QMainWindow):
             init_txt = "Online" if online else "Offline"
             init_col = C["green"] if online else C["dim"]
             status_lbl = QLabel(init_txt)
-            status_lbl.setFixedWidth(80)
+            status_lbl.setFixedWidth(70)
             status_lbl.setStyleSheet(
-                f"color: {init_col}; font-size: 8pt; font-weight: bold;")
+                f"color: {init_col}; font-size: 8pt; font-weight: 600;")
             row_layout.addWidget(status_lbl)
 
             # Buttons
@@ -1928,7 +2401,7 @@ class VPNApp(QMainWindow):
             star_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: transparent; color: {star_col};
-                    border: none; font-size: 14pt; padding: 0 4px;
+                    border: none; font-size: 13pt; padding: 0 4px;
                 }}
                 QPushButton:hover {{ color: {C['yellow']}; }}
             """)
@@ -1937,27 +2410,40 @@ class VPNApp(QMainWindow):
                 lambda checked, x=did, b=star_btn: self._toggle_favorite(x, b))
             row_layout.addWidget(star_btn)
 
+            _btn_qss = f"""
+                QPushButton {{
+                    background: {C['card']}; color: {C['fg']};
+                    border: 1px solid {C['border']}; border-radius: 4px;
+                    padding: 5px 12px; font-size: 9pt; font-weight: 500;
+                }}
+                QPushButton:hover {{
+                    background: {C['surface_h']}; border: 1px solid {C['border_l']};
+                }}
+                QPushButton:pressed {{ background: {C['surface']}; }}
+                QPushButton:disabled {{
+                    background: {C['surface']}; color: rgba(255,255,255,0.3);
+                    border: 1px solid {C['border']};
+                }}
+            """
+
             if online:
-                b = _make_btn("RDP", C["surface"], C["fg"], C["border"])
-                b.setStyleSheet(b.styleSheet().replace(
-                    "font-weight: bold;", "font-weight: normal; font-size: 9pt;"))
+                b = QPushButton("RDP")
+                b.setStyleSheet(_btn_qss)
                 b.clicked.connect(
                     lambda checked, x=dip, n=dn, bl=btn_refs, sl=status_lbl:
                     self._on_rdp_with_user(x, n, bl, sl))
                 row_layout.addWidget(b)
                 btn_refs.append(b)
             else:
-                b1 = _make_btn("WoL", C["surface"], C["fg"], C["border"])
-                b1.setStyleSheet(b1.styleSheet().replace(
-                    "font-weight: bold;", "font-weight: normal; font-size: 9pt;"))
+                b1 = QPushButton("WoL")
+                b1.setStyleSheet(_btn_qss)
                 b1.clicked.connect(
                     lambda checked, x=did, n=dn, bl=btn_refs, sl=status_lbl:
                     self._on_wake(x, n, bl, sl))
                 row_layout.addWidget(b1)
 
-                b2 = _make_btn("WoL + RDP", C["surface"], C["fg"], C["border"])
-                b2.setStyleSheet(b2.styleSheet().replace(
-                    "font-weight: bold;", "font-weight: normal; font-size: 9pt;"))
+                b2 = QPushButton("WoL + RDP")
+                b2.setStyleSheet(_btn_qss)
                 b2.clicked.connect(
                     lambda checked, x=did, y=dip, n=dn, bl=btn_refs, sl=status_lbl:
                     self._on_wake_rdp(x, y, n, bl, sl))
@@ -2355,11 +2841,11 @@ class VPNApp(QMainWindow):
     def _toggle_history(self):
         if self._history_visible:
             self.history_frame.hide()
-            self.history_toggle.setText("[+] Verbindungshistorie")
+            self.history_toggle.setText("›  Verbindungshistorie")
             self._history_visible = False
         else:
             self.history_frame.show()
-            self.history_toggle.setText("[-] Verbindungshistorie")
+            self.history_toggle.setText("⌄  Verbindungshistorie")
             self._history_visible = True
             self._refresh_history_ui()
 
@@ -2387,7 +2873,7 @@ class VPNApp(QMainWindow):
                 dur_str = f"{h:02d}:{m:02d}:{s:02d}"
                 text = f"{entry.get('start','?')}  •  {entry.get('config','?')}  •  {dur_str}"
                 row = QLabel(text)
-                row.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; padding: 2px 4px;")
+                row.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; padding: 4px 6px; border-radius: 3px;")
                 self.history_list_layout.addWidget(row)
         except Exception:
             pass
