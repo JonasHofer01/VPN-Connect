@@ -39,6 +39,15 @@ if sys.platform == "win32":
         ctypes.windll.kernel32.FreeConsole()
     except Exception:
         pass
+    # Nach FreeConsole sind stdout/stderr Handles ungueltig → umleiten
+    try:
+        if sys.stdout is None or sys.stdout.closed:
+            sys.stdout = open(os.devnull, "w")
+        if sys.stderr is None or sys.stderr.closed:
+            sys.stderr = open(os.devnull, "w")
+    except Exception:
+        sys.stdout = open(os.devnull, "w")
+        sys.stderr = open(os.devnull, "w")
 
 SW_HIDE = 0
 CREATE_NO_WINDOW = 0x08000000
@@ -561,6 +570,11 @@ def check_for_update() -> Optional[dict]:
                     "name": asset["name"],
                 }
         log("Release ohne .exe-Asset.", "warning")
+    except error.HTTPError as e:
+        if e.code == 404:
+            log("Kein Release auf GitHub vorhanden – Update-Check uebersprungen.")
+        else:
+            log(f"Update-Check fehlgeschlagen: HTTP {e.code}", "warning")
     except Exception as e:
         log(f"Update-Check fehlgeschlagen: {e}", "warning")
     return None
