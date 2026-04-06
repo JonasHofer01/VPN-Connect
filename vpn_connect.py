@@ -10,6 +10,7 @@ import json
 import logging
 import threading
 import base64
+import hashlib
 from typing import Optional, List, Tuple
 from urllib import request, error
 
@@ -27,7 +28,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -774,7 +775,6 @@ class AppSignals(QObject):
     disconnected_signal = pyqtSignal()
     cancel_done_signal = pyqtSignal()
     show_devices_signal = pyqtSignal(list)
-    enable_refresh_signal = pyqtSignal()
     enable_login_signal = pyqtSignal()
     logged_in_signal = pyqtSignal()
     update_available_signal = pyqtSignal(dict)
@@ -790,6 +790,7 @@ class AppSignals(QObject):
     auto_login_signal = pyqtSignal()                  # trigger upsnap auto-login
     vpn_ip_signal = pyqtSignal(str)                   # VPN tunnel IP
     history_updated_signal = pyqtSignal()
+    transfer_signal = pyqtSignal(str)                  # "↓ X MB  ↑ Y MB"
 
 
 # =============================================================================
@@ -848,7 +849,6 @@ class VPNApp(QMainWindow):
             "Tastaturkuerzel:\n"
             "  Strg+K   Verbinden\n"
             "  Strg+D   Trennen\n"
-            "  Strg+R   Geraete aktualisieren\n"
             "  Strg+L   Log ein/aus\n"
             "  Strg+H   Verlauf ein/aus"
         )
@@ -865,6 +865,8 @@ class VPNApp(QMainWindow):
         self._session_config_name: str = ""
         self._favorites: List[str] = []        # device IDs
         self._rdp_users: dict = {}             # device_name -> username
+        self._devices_hash: str = ""           # Hash der Geräteliste (Smart-Refresh)
+        self._active_ops: set = set()          # Device-IDs mit laufenden Operationen
 
         # Connection duration
         self._connect_time: float = 0
@@ -887,10 +889,15 @@ class VPNApp(QMainWindow):
         self.sig = AppSignals()
         self._connect_signals()
 
-        # Auto-Refresh Timer
+        # Auto-Refresh Timer (alle 3 Sekunden)
         self._auto_refresh_timer = QTimer(self)
-        self._auto_refresh_timer.setInterval(30_000)
+        self._auto_refresh_timer.setInterval(3_000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_tick)
+
+        # Transfer-Stats Timer
+        self._transfer_timer = QTimer(self)
+        self._transfer_timer.setInterval(5_000)
+        self._transfer_timer.timeout.connect(self._transfer_tick)
 
         self._build_ui()
         self._setup_tray()
@@ -912,8 +919,6 @@ class VPNApp(QMainWindow):
         self.sig.disconnected_signal.connect(self._disconnected)
         self.sig.cancel_done_signal.connect(lambda: self.btn_cancel.hide())
         self.sig.show_devices_signal.connect(self._show_devices)
-        self.sig.enable_refresh_signal.connect(
-            lambda: self.btn_refresh_devices.setEnabled(True))
         self.sig.enable_login_signal.connect(
             lambda: self.btn_login.setEnabled(True))
         self.sig.logged_in_signal.connect(self._on_logged_in)
@@ -932,6 +937,7 @@ class VPNApp(QMainWindow):
         self.sig.auto_login_signal.connect(self._try_auto_login)
         self.sig.vpn_ip_signal.connect(self._update_ip_label)
         self.sig.history_updated_signal.connect(self._refresh_history_ui)
+        self.sig.transfer_signal.connect(self._update_transfer_label)
 
     # ── Layout ─────────────────────────────────────────────────────────────
 
@@ -993,6 +999,15 @@ class VPNApp(QMainWindow):
         hdr.addWidget(self.vpn_ip_label)
         hdr.addSpacing(14)
 
+        # Transfer-Stats Label
+        self.transfer_label = QLabel("")
+        self.transfer_label.setFont(QFont("Consolas", 10))
+        self.transfer_label.setStyleSheet(f"color: {C['dim']};")
+        self.transfer_label.setToolTip("VPN Datentransfer")
+        self.transfer_label.hide()
+        hdr.addWidget(self.transfer_label)
+        hdr.addSpacing(14)
+
         # Status
         status_box = QHBoxLayout()
         status_box.setSpacing(6)
@@ -1023,6 +1038,8 @@ class VPNApp(QMainWindow):
 
         self.config_listbox = QListWidget()
         self.config_listbox.setMaximumHeight(80)
+        self.config_listbox.itemDoubleClicked.connect(
+            lambda: self._on_connect() if not self.vpn_connected else None)
         wg_layout.addWidget(self.config_listbox)
 
         btn_row = QHBoxLayout()
@@ -1065,6 +1082,22 @@ class VPNApp(QMainWindow):
             }}
         """)
         wg_layout.addWidget(self.chk_auto_reconnect)
+
+        # Auto-Connect beim Start Checkbox
+        self.chk_auto_connect = QCheckBox("Automatisch verbinden beim Start")
+        self.chk_auto_connect.setStyleSheet(f"""
+            QCheckBox {{ color: {C['dim']}; font-size: 9pt; }}
+            QCheckBox::indicator {{ width: 14px; height: 14px; }}
+            QCheckBox::indicator:unchecked {{
+                border: 1px solid {C['border']}; border-radius: 3px;
+                background: {C['surface']};
+            }}
+            QCheckBox::indicator:checked {{
+                border: 1px solid {C['accent']}; border-radius: 3px;
+                background: {C['accent']};
+            }}
+        """)
+        wg_layout.addWidget(self.chk_auto_connect)
 
         main_layout.addWidget(wg_card)
         main_layout.addSpacing(16)
@@ -1112,13 +1145,6 @@ class VPNApp(QMainWindow):
         self.btn_login.clicked.connect(self._on_upsnap_login)
         login_row.addWidget(self.btn_login)
 
-        self.btn_refresh_devices = _make_btn("Aktualisieren", C["surface"], C["fg"], C["border"])
-        self.btn_refresh_devices.setStyleSheet(
-            self.btn_refresh_devices.styleSheet().replace("font-weight: bold;", "font-weight: normal;"))
-        self.btn_refresh_devices.clicked.connect(self._on_refresh_devices)
-        self.btn_refresh_devices.setEnabled(False)
-        login_row.addWidget(self.btn_refresh_devices)
-
         login_row.addStretch()
         snap_layout.addLayout(login_row)
 
@@ -1127,6 +1153,14 @@ class VPNApp(QMainWindow):
         sep.setFixedHeight(1)
         sep.setStyleSheet(f"background-color: {C['border']};")
         snap_layout.addWidget(sep)
+
+        # Geräte-Info-Zeile (Count + Zeitstempel)
+        self.device_info_label = QLabel("")
+        self.device_info_label.setStyleSheet(
+            f"color: {C['dim']}; font-size: 8pt;")
+        self.device_info_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.device_info_label.hide()
+        snap_layout.addWidget(self.device_info_label)
 
         # Device-Bereich
         self.device_frame = QVBoxLayout()
@@ -1212,7 +1246,6 @@ class VPNApp(QMainWindow):
             lambda: self._on_connect() if not self.vpn_connected else None)
         QShortcut(QKeySequence("Ctrl+D"), self).activated.connect(
             lambda: self._on_disconnect() if self.vpn_connected else None)
-        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self._on_refresh_devices)
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._toggle_log)
         QShortcut(QKeySequence("Ctrl+H"), self).activated.connect(self._toggle_history)
 
@@ -1382,6 +1415,10 @@ class VPNApp(QMainWindow):
         self._ping_timer.start()
         self._ping_tick()  # sofort einmal pingen
 
+        # Transfer-Stats starten
+        self._transfer_timer.start()
+        self._transfer_tick()
+
         # Watchdog starten
         self._reconnect_retries = 0
         if self.chk_auto_reconnect.isChecked():
@@ -1429,6 +1466,9 @@ class VPNApp(QMainWindow):
         self.ping_label.hide()
         self.vpn_ip_label.hide()
         self._watchdog_timer.stop()
+        self._transfer_timer.stop()
+        self.transfer_label.hide()
+        self._active_ops.clear()
 
         # History-Eintrag abschließen
         if self._session_start_time > 0:
@@ -1509,6 +1549,7 @@ class VPNApp(QMainWindow):
                 "pw_b64": base64.b64encode(p.encode("utf-8")).decode("ascii") if p else "",
                 "last_config": self.config_listbox.currentRow(),
                 "auto_reconnect": self.chk_auto_reconnect.isChecked(),
+                "auto_connect": self.chk_auto_connect.isChecked(),
                 "favorites": self._favorites,
                 "rdp_users": self._rdp_users,
             })
@@ -1547,9 +1588,16 @@ class VPNApp(QMainWindow):
             # Auto-Reconnect
             self.chk_auto_reconnect.setChecked(d.get("auto_reconnect", False))
 
+            # Auto-Connect
+            self.chk_auto_connect.setChecked(d.get("auto_connect", False))
+
             # Favoriten & RDP-User
             self._favorites = d.get("favorites", [])
             self._rdp_users = d.get("rdp_users", {})
+
+            # Auto-Connect beim Start
+            if d.get("auto_connect", False) and self.configs:
+                QTimer.singleShot(800, self._on_connect)
 
         except Exception:
             pass
@@ -1594,7 +1642,6 @@ class VPNApp(QMainWindow):
                     self.upsnap = c
                     devs = c.get_devices()
                     self.sig.show_devices_signal.emit(devs)
-                    self.sig.enable_refresh_signal.emit()
                     self.sig.logged_in_signal.emit()
                     # Credentials speichern (muss im Main-Thread)
                     QTimer.singleShot(0, lambda: self._save_credentials(u, p))
@@ -1619,6 +1666,7 @@ class VPNApp(QMainWindow):
         """Abmelden und UI zurücksetzen."""
         self.upsnap = None
         self._stop_auto_refresh()
+        self._devices_hash = ""
 
         # Geräte-Widgets entfernen
         for w in self._device_widgets:
@@ -1626,6 +1674,7 @@ class VPNApp(QMainWindow):
             w.deleteLater()
         self._device_widgets.clear()
         self.upsnap_hint.show()
+        self.device_info_label.hide()
 
         # UI zurücksetzen
         self.btn_login.setText("Anmelden")
@@ -1633,28 +1682,29 @@ class VPNApp(QMainWindow):
         self.entry_user.show()
         self.lbl_pw.show()
         self.entry_pass.show()
-        self.btn_refresh_devices.setEnabled(False)
         log("UpSnap abgemeldet.")
-
-    def _on_refresh_devices(self):
-        if not self.upsnap:
-            return
-        self.btn_refresh_devices.setEnabled(False)
-        log("Geräteliste wird aktualisiert...")
-
-        def work():
-            try:
-                devs = self.upsnap.get_devices()
-            except Exception as e:
-                log(f"Geräteliste Fehler: {e}", "error")
-                devs = []
-            self.sig.show_devices_signal.emit(devs)
-            self.sig.enable_refresh_signal.emit()
-        threading.Thread(target=work, daemon=True).start()
 
     # ── Device-Anzeige ─────────────────────────────────────────────────────
 
     def _show_devices(self, devices: List[dict]):
+        # Smart-Refresh: Hash berechnen (nur relevante Felder)
+        hash_data = [(d.get("id", ""), d.get("name", ""), d.get("ip", ""),
+                       d.get("status", "")) for d in devices]
+        new_hash = hashlib.md5(json.dumps(hash_data, sort_keys=True).encode()).hexdigest()
+
+        # Rebuild unterdrücken wenn aktive Operationen laufen
+        if self._active_ops:
+            # Info-Label trotzdem aktualisieren
+            self._update_device_info(devices)
+            return
+
+        # Kein Rebuild wenn sich nichts geändert hat
+        if new_hash == self._devices_hash:
+            self._update_device_info(devices)
+            return
+
+        self._devices_hash = new_hash
+
         # Alte Widgets entfernen
         for w in self._device_widgets:
             w.setParent(None)
@@ -1669,6 +1719,7 @@ class VPNApp(QMainWindow):
             self.device_frame.addWidget(lbl)
             self._device_widgets.append(lbl)
             self.btn_login.setEnabled(True)
+            self._update_device_info(devices)
             return
 
         # Favoriten zuerst sortieren
@@ -1764,6 +1815,16 @@ class VPNApp(QMainWindow):
             self._device_widgets.append(row)
 
         self.btn_login.setEnabled(True)
+        self._update_device_info(devices)
+
+    def _update_device_info(self, devices: List[dict]):
+        """Geräte-Count und Zeitstempel aktualisieren."""
+        total = len(devices)
+        online = sum(1 for d in devices if d.get("status") == "online")
+        ts = time.strftime("%H:%M:%S")
+        self.device_info_label.setText(
+            f"{total} Geräte ({online} online)  •  Aktualisiert: {ts}")
+        self.device_info_label.show()
 
     # ── Device-Status Hilfsfunktionen ──────────────────────────────────────
 
@@ -1807,17 +1868,21 @@ class VPNApp(QMainWindow):
                  btn_refs: list, status_lbl: QLabel):
         if not self.upsnap:
             return
+        self._active_ops.add(did)
         self._set_btns(btn_refs, False)
         self._set_device_status(status_lbl, "WoL senden...", C["yellow"])
         log(f"WoL -> '{name}'")
 
         def work():
-            self.upsnap.wake(did)
-            self.sig.device_status_signal.emit(status_lbl, "Einschalten...", C["orange"])
-            self._notify("Wake-on-LAN", f"'{name}' wird aufgeweckt...")
-            QTimer.singleShot(3000, lambda: self.sig.btns_state_signal.emit(btn_refs, True))
-            QTimer.singleShot(3000, lambda: self.sig.device_status_signal.emit(
-                status_lbl, "Offline", C["dim"]))
+            try:
+                self.upsnap.wake(did)
+                self.sig.device_status_signal.emit(status_lbl, "Einschalten...", C["orange"])
+                self._notify("Wake-on-LAN", f"'{name}' wird aufgeweckt...")
+                time.sleep(3)
+                self.sig.device_status_signal.emit(status_lbl, "Offline", C["dim"])
+                self.sig.btns_state_signal.emit(btn_refs, True)
+            finally:
+                self._active_ops.discard(did)
         threading.Thread(target=work, daemon=True).start()
 
     def _on_rdp_with_user(self, ip: str, name: str,
@@ -1867,38 +1932,47 @@ class VPNApp(QMainWindow):
                      btn_refs: list, status_lbl: QLabel):
         if not self.upsnap:
             return
+        self._active_ops.add(did)
         self._set_btns(btn_refs, False)
         self._set_device_status(status_lbl, "WoL senden...", C["yellow"])
         log(f"WoL + RDP -> '{name}'")
 
         def work():
-            self.upsnap.wake(did)
-            self.sig.device_status_signal.emit(status_lbl, "Einschalten...", C["orange"])
-            log(f"Warte auf '{name}' (max 120s)...")
-            t0 = time.time()
-            while time.time() - t0 < 120:
-                try:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.settimeout(3)
-                    s.connect((ip, 3389))
-                    s.close()
+            try:
+                self.upsnap.wake(did)
+                self.sig.device_status_signal.emit(status_lbl, "Einschalten...", C["orange"])
+                log(f"Warte auf '{name}' (max 120s)...")
+                t0 = time.time()
+                reachable = False
+                while time.time() - t0 < 120:
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(3)
+                        s.connect((ip, 3389))
+                        s.close()
+                        reachable = True
+                        break
+                    except (OSError, socket.error):
+                        pass
+                    elapsed = int(time.time() - t0)
+                    self.sig.device_status_signal.emit(
+                        status_lbl, f"Warte {elapsed}s...", C["orange"])
+                    log(f"  Warte... ({elapsed}s)")
+                    time.sleep(2)
+
+                if reachable:
                     log(f"'{name}' bereit!")
                     self.sig.device_status_signal.emit(status_lbl, "Online", C["green"])
                     time.sleep(3)
                     self.sig.trigger_rdp_signal.emit(ip, name, btn_refs, status_lbl)
                     return
-                except Exception:
-                    pass
-                elapsed = int(time.time() - t0)
-                self.sig.device_status_signal.emit(
-                    status_lbl, f"Warte {elapsed}s...", C["orange"])
-                log(f"  Warte... ({elapsed}s)")
-                time.sleep(2)
 
-            log(f"'{name}' nicht erreichbar.", "warning")
-            self.sig.device_status_signal.emit(status_lbl, "Timeout", C["red"])
-            self.sig.btns_state_signal.emit(btn_refs, True)
-            self.sig.ask_rdp_signal.emit(ip, name, btn_refs, status_lbl)
+                log(f"'{name}' nicht erreichbar.", "warning")
+                self.sig.device_status_signal.emit(status_lbl, "Timeout", C["red"])
+                self.sig.btns_state_signal.emit(btn_refs, True)
+                self.sig.ask_rdp_signal.emit(ip, name, btn_refs, status_lbl)
+            finally:
+                self._active_ops.discard(did)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1950,6 +2024,51 @@ class VPNApp(QMainWindow):
                     self.ping_label.setStyleSheet(f"color: {C['orange']};")
             except ValueError:
                 self.ping_label.setStyleSheet(f"color: {C['dim']};")
+
+    # ── Transfer-Stats ─────────────────────────────────────────────────────
+
+    def _transfer_tick(self):
+        """VPN-Datentransfer im Hintergrund abfragen."""
+        if not self.active_config:
+            return
+        tn = extract_tunnel_name(self.active_config)
+
+        def work():
+            try:
+                r = _run_silent(
+                    ["wg", "show", tn, "transfer"],
+                    capture_output=True, text=True, timeout=5)
+                if r.returncode != 0 or not r.stdout.strip():
+                    return
+                # Format: <peer_pubkey>\t<rx_bytes>\t<tx_bytes>
+                total_rx, total_tx = 0, 0
+                for line in r.stdout.strip().splitlines():
+                    parts = line.split("\t")
+                    if len(parts) >= 3:
+                        total_rx += int(parts[1])
+                        total_tx += int(parts[2])
+                text = f"↓ {self._format_bytes(total_rx)}  ↑ {self._format_bytes(total_tx)}"
+                self.sig.transfer_signal.emit(text)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _format_bytes(b: int) -> str:
+        """Bytes in lesbare Einheit formatieren."""
+        if b < 1024:
+            return f"{b} B"
+        elif b < 1024 ** 2:
+            return f"{b / 1024:.1f} KB"
+        elif b < 1024 ** 3:
+            return f"{b / 1024 ** 2:.1f} MB"
+        else:
+            return f"{b / 1024 ** 3:.2f} GB"
+
+    def _update_transfer_label(self, text: str):
+        """Transfer-Stats Label aktualisieren (Main-Thread)."""
+        self.transfer_label.setText(text)
+        self.transfer_label.show()
 
     # ── Auto-Login UpSnap ─────────────────────────────────────────────────
 
