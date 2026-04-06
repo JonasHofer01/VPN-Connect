@@ -1502,12 +1502,17 @@ class VPNApp(QMainWindow):
         self.btn_disconnect.setEnabled(False)
         self._set_status("Trenne...", C["yellow"])
 
+        # Watchdog SOFORT stoppen – verhindert Auto-Reconnect während manuellem Trennen
+        self._watchdog_timer.stop()
+        self._reconnect_retries = 0
+
         def work():
             global _active_config
             if self.active_config:
                 disconnect_vpn(self.active_config)
                 _active_config = None
             self.sig.disconnected_signal.emit()
+
         threading.Thread(target=work, daemon=True).start()
 
     # ── Browser ────────────────────────────────────────────────────────────
@@ -2377,6 +2382,8 @@ class VPNApp(QMainWindow):
     def _tray_quit(self):
         """Wirklich beenden (über Tray)."""
         global _active_config
+        self._watchdog_timer.stop()   # kein Auto-Reconnect beim Beenden
+        self._reconnect_retries = 0
         if self.active_config:
             disconnect_vpn(self.active_config)
         _active_config = None
@@ -2411,6 +2418,8 @@ class VPNApp(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+            self._watchdog_timer.stop()   # kein Auto-Reconnect beim Beenden
+            self._reconnect_retries = 0
             disconnect_vpn(self.active_config)
         _active_config = None
         self.active_config = None
