@@ -928,10 +928,11 @@ class VPNApp(QMainWindow):
         self._transfer_timer.setInterval(5_000)
         self._transfer_timer.timeout.connect(self._transfer_tick)
 
+        self._loading = True          # blockiert _save_settings während gesamter Initialisierung
         self._build_ui()
         self._setup_tray()
         self._load_configs()
-        self._load_credentials()
+        self._load_credentials()      # setzt _loading=False am Ende selbst
 
         # Update-Check im Hintergrund
         threading.Thread(target=self._check_update_bg, daemon=True).start()
