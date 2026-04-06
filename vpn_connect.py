@@ -9,22 +9,24 @@ import atexit
 import json
 import logging
 import threading
+import base64
 from typing import Optional, List, Tuple
 from urllib import request, error
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QListWidget, QFrame,
-    QScrollArea, QTextEdit, QMessageBox,
+    QScrollArea, QTextEdit, QMessageBox, QSystemTrayIcon, QMenu,
+    QCheckBox,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QFont, QColor, QPainter
+from PyQt6.QtGui import QFont, QColor, QPainter, QAction, QPixmap, QIcon
 
 # =============================================================================
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -782,6 +784,9 @@ class AppSignals(QObject):
     btns_state_signal = pyqtSignal(list, bool)            # btn_refs, enabled
     trigger_rdp_signal = pyqtSignal(str, str, list, object)  # ip, name, btns, lbl
     ask_rdp_signal = pyqtSignal(str, str, list, object)
+    ping_result_signal = pyqtSignal(str)              # "{ms} ms" or "---"
+    reconnect_signal = pyqtSignal()                   # trigger auto-reconnect
+    auto_login_signal = pyqtSignal()                  # trigger upsnap auto-login
 
 
 # =============================================================================
@@ -845,6 +850,23 @@ class VPNApp(QMainWindow):
         self._log_visible = False
         self._update_info: Optional[dict] = None
 
+        # Connection duration
+        self._connect_time: float = 0
+        self._duration_timer = QTimer(self)
+        self._duration_timer.setInterval(1000)
+        self._duration_timer.timeout.connect(self._update_duration)
+
+        # Ping
+        self._ping_timer = QTimer(self)
+        self._ping_timer.setInterval(5000)
+        self._ping_timer.timeout.connect(self._ping_tick)
+
+        # Auto-Reconnect
+        self._reconnect_retries = 0
+        self._watchdog_timer = QTimer(self)
+        self._watchdog_timer.setInterval(10_000)
+        self._watchdog_timer.timeout.connect(self._watchdog_tick)
+
         # Signale
         self.sig = AppSignals()
         self._connect_signals()
@@ -855,6 +877,7 @@ class VPNApp(QMainWindow):
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_tick)
 
         self._build_ui()
+        self._setup_tray()
         self._load_configs()
         self._load_credentials()
 
@@ -888,6 +911,9 @@ class VPNApp(QMainWindow):
         self.sig.trigger_rdp_signal.connect(
             lambda ip, name, bl, sl: self._on_rdp(ip, name, bl, sl))
         self.sig.ask_rdp_signal.connect(self._ask_rdp_anyway)
+        self.sig.ping_result_signal.connect(self._update_ping_label)
+        self.sig.reconnect_signal.connect(self._on_auto_reconnect)
+        self.sig.auto_login_signal.connect(self._try_auto_login)
 
     # ── Layout ─────────────────────────────────────────────────────────────
 
@@ -923,6 +949,22 @@ class VPNApp(QMainWindow):
         hdr.addWidget(self.btn_update)
 
         hdr.addStretch()
+
+        # Duration Label
+        self.duration_label = QLabel("")
+        self.duration_label.setFont(QFont("Consolas", 10))
+        self.duration_label.setStyleSheet(f"color: {C['dim']};")
+        self.duration_label.hide()
+        hdr.addWidget(self.duration_label)
+        hdr.addSpacing(10)
+
+        # Ping Label
+        self.ping_label = QLabel("")
+        self.ping_label.setFont(QFont("Consolas", 10))
+        self.ping_label.setStyleSheet(f"color: {C['dim']};")
+        self.ping_label.hide()
+        hdr.addWidget(self.ping_label)
+        hdr.addSpacing(14)
 
         # Status
         status_box = QHBoxLayout()
@@ -980,6 +1022,23 @@ class VPNApp(QMainWindow):
 
         btn_row.addStretch()
         wg_layout.addLayout(btn_row)
+
+        # Auto-Reconnect Checkbox
+        self.chk_auto_reconnect = QCheckBox("Auto-Reconnect bei Verbindungsverlust")
+        self.chk_auto_reconnect.setStyleSheet(f"""
+            QCheckBox {{ color: {C['dim']}; font-size: 9pt; }}
+            QCheckBox::indicator {{ width: 14px; height: 14px; }}
+            QCheckBox::indicator:unchecked {{
+                border: 1px solid {C['border']}; border-radius: 3px;
+                background: {C['surface']};
+            }}
+            QCheckBox::indicator:checked {{
+                border: 1px solid {C['accent']}; border-radius: 3px;
+                background: {C['accent']};
+            }}
+        """)
+        wg_layout.addWidget(self.chk_auto_reconnect)
+
         main_layout.addWidget(wg_card)
         main_layout.addSpacing(16)
 
@@ -1239,6 +1298,33 @@ class VPNApp(QMainWindow):
         else:
             log("Ziel noch nicht erreichbar.", "warning")
 
+        # Duration-Timer starten
+        self._connect_time = time.time()
+        self.duration_label.setText("00:00:00")
+        self.duration_label.show()
+        self._duration_timer.start()
+
+        # Ping starten
+        self.ping_label.show()
+        self._ping_timer.start()
+        self._ping_tick()  # sofort einmal pingen
+
+        # Watchdog starten
+        self._reconnect_retries = 0
+        if self.chk_auto_reconnect.isChecked():
+            self._watchdog_timer.start()
+
+        # Config-Auswahl speichern
+        self._save_settings()
+
+        # Tray-Tooltip
+        if hasattr(self, '_tray') and self._tray:
+            self._tray.setToolTip(f"VPN Connect - Verbunden")
+            self._tray_act_toggle.setText("Trennen")
+
+        # Auto-Login bei UpSnap
+        QTimer.singleShot(500, lambda: self.sig.auto_login_signal.emit())
+
     def _disconnected(self):
         self._set_status("Getrennt", C["red"])
         self.btn_connect.setEnabled(True)
@@ -1249,6 +1335,18 @@ class VPNApp(QMainWindow):
         self.btn_cancel.setText("Abbrechen")
         self.vpn_connected = False
         self.active_config = None
+
+        # Timer stoppen
+        self._duration_timer.stop()
+        self.duration_label.hide()
+        self._ping_timer.stop()
+        self.ping_label.hide()
+        self._watchdog_timer.stop()
+
+        # Tray-Tooltip
+        if hasattr(self, '_tray') and self._tray:
+            self._tray.setToolTip(f"VPN Connect - Getrennt")
+            self._tray_act_toggle.setText("Verbinden")
 
     # ── VPN Disconnect ─────────────────────────────────────────────────────
 
@@ -1292,24 +1390,58 @@ class VPNApp(QMainWindow):
         except Exception as e:
             log(f"Browser-Fehler: {e}", "error")
 
-    # ── Credentials ────────────────────────────────────────────────────────
+    # ── Settings / Credentials ─────────────────────────────────────────────
 
     _CRED_FILE = os.path.join(_base_dir, "vpn_settings.json")
 
-    def _save_credentials(self, user: str, pw: str):
+    def _save_settings(self):
+        """Alle Einstellungen in eine Datei speichern."""
+        u = self.entry_user.text().strip()
+        p = self.entry_pass.text().strip()
         try:
+            data = {
+                "v": 2,
+                "user": u,
+                "pw_b64": base64.b64encode(p.encode("utf-8")).decode("ascii") if p else "",
+                "last_config": self.config_listbox.currentRow(),
+                "auto_reconnect": self.chk_auto_reconnect.isChecked(),
+            }
             with open(self._CRED_FILE, "w", encoding="utf-8") as f:
-                json.dump({"user": user, "pw": pw}, f)
+                json.dump(data, f, indent=2)
         except OSError:
             pass
 
+    def _save_credentials(self, user: str, pw: str):
+        self.entry_user.setText(user)
+        self.entry_pass.setText(pw)
+        self._save_settings()
+
     def _load_credentials(self):
         try:
-            if os.path.exists(self._CRED_FILE):
-                with open(self._CRED_FILE, "r", encoding="utf-8") as f:
-                    d = json.load(f)
-                self.entry_user.setText(d.get("user", ""))
-                self.entry_pass.setText(d.get("pw", ""))
+            if not os.path.exists(self._CRED_FILE):
+                return
+            with open(self._CRED_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+
+            self.entry_user.setText(d.get("user", ""))
+
+            # Passwort: v2=base64, v1=plaintext
+            if d.get("v", 1) >= 2 and d.get("pw_b64"):
+                pw = base64.b64decode(d["pw_b64"].encode("ascii")).decode("utf-8")
+                self.entry_pass.setText(pw)
+            elif d.get("pw"):
+                self.entry_pass.setText(d["pw"])
+                # Migration zu v2
+                QTimer.singleShot(500, self._save_settings)
+
+            # Letzte Config
+            idx = d.get("last_config", 0)
+            if 0 <= idx < self.config_listbox.count():
+                self.config_listbox.setCurrentRow(idx)
+
+            # Auto-Reconnect
+            self.chk_auto_reconnect.setChecked(d.get("auto_reconnect", False))
+
         except Exception:
             pass
 
@@ -1638,9 +1770,161 @@ class VPNApp(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self._on_rdp(ip, name, btn_refs, status_lbl)
 
+    # ── Duration Timer ──────────────────────────────────────────────────────
+
+    def _update_duration(self):
+        if self._connect_time > 0:
+            elapsed = int(time.time() - self._connect_time)
+            h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
+            self.duration_label.setText(f"{h:02d}:{m:02d}:{s:02d}")
+            self.duration_label.setStyleSheet(f"color: {C['green']};")
+
+    # ── Ping ──────────────────────────────────────────────────────────────
+
+    def _ping_tick(self):
+        def work():
+            try:
+                t0 = time.time()
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(3)
+                s.connect((TARGET_IP, TARGET_PORT))
+                s.close()
+                ms = int((time.time() - t0) * 1000)
+                self.sig.ping_result_signal.emit(f"{ms} ms")
+            except Exception:
+                self.sig.ping_result_signal.emit("---")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_ping_label(self, text: str):
+        self.ping_label.setText(f"Ping: {text}")
+        if text == "---":
+            self.ping_label.setStyleSheet(f"color: {C['red']};")
+        else:
+            try:
+                ms = int(text.replace(" ms", ""))
+                if ms < 50:
+                    self.ping_label.setStyleSheet(f"color: {C['green']};")
+                elif ms < 150:
+                    self.ping_label.setStyleSheet(f"color: {C['yellow']};")
+                else:
+                    self.ping_label.setStyleSheet(f"color: {C['orange']};")
+            except ValueError:
+                self.ping_label.setStyleSheet(f"color: {C['dim']};")
+
+    # ── Auto-Login UpSnap ─────────────────────────────────────────────────
+
+    def _try_auto_login(self):
+        """Nach VPN-Connect automatisch bei UpSnap anmelden, wenn Credentials vorhanden."""
+        if self.upsnap is not None:
+            return  # Bereits angemeldet
+        u = self.entry_user.text().strip()
+        p = self.entry_pass.text().strip()
+        if u and p and self.vpn_connected:
+            log("Auto-Login bei UpSnap...")
+            self._on_upsnap_login()
+
+    # ── Auto-Reconnect / Watchdog ─────────────────────────────────────────
+
+    def _watchdog_tick(self):
+        """Prüft ob der VPN-Tunnel noch läuft."""
+        if not self.vpn_connected or not self.active_config:
+            return
+        tn = extract_tunnel_name(self.active_config)
+        state = _service_state(tn)
+        if state == "RUNNING":
+            self._reconnect_retries = 0
+            return
+        # Unerwarteter Disconnect
+        log("Watchdog: VPN-Verbindung verloren!", "warning")
+        self._watchdog_timer.stop()
+        self.sig.reconnect_signal.emit()
+
+    def _on_auto_reconnect(self):
+        if self._reconnect_retries >= 3:
+            log("Auto-Reconnect: Max. Versuche (3) erreicht.", "error")
+            self._disconnected()
+            return
+        self._reconnect_retries += 1
+        log(f"Auto-Reconnect: Versuch {self._reconnect_retries}/3...")
+        self._set_status(f"Reconnect {self._reconnect_retries}/3...", C["orange"])
+        self._on_connect()
+
+    # ── System Tray ───────────────────────────────────────────────────────
+
+    def _setup_tray(self):
+        """System-Tray-Icon mit Kontextmenü einrichten."""
+        # Einfaches Icon generieren (farbiges Quadrat)
+        px = QPixmap(64, 64)
+        px.fill(QColor(C["accent"]))
+        icon = QIcon(px)
+
+        self._tray = QSystemTrayIcon(icon, self)
+        self._tray.setToolTip("VPN Connect - Getrennt")
+
+        menu = QMenu()
+        act_show = QAction("Anzeigen", self)
+        act_show.triggered.connect(self._tray_show)
+        menu.addAction(act_show)
+
+        menu.addSeparator()
+
+        self._tray_act_toggle = QAction("Verbinden", self)
+        self._tray_act_toggle.triggered.connect(self._tray_toggle_vpn)
+        menu.addAction(self._tray_act_toggle)
+
+        menu.addSeparator()
+
+        act_quit = QAction("Beenden", self)
+        act_quit.triggered.connect(self._tray_quit)
+        menu.addAction(act_quit)
+
+        self._tray.setContextMenu(menu)
+        self._tray.activated.connect(self._tray_activated)
+        self._tray.show()
+
+    def _tray_show(self):
+        self.showNormal()
+        self.activateWindow()
+
+    def _tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._tray_show()
+
+    def _tray_toggle_vpn(self):
+        if self.vpn_connected:
+            self._on_disconnect()
+            self._tray_act_toggle.setText("Verbinden")
+        else:
+            self._on_connect()
+            self._tray_act_toggle.setText("Trennen")
+
+    def _tray_quit(self):
+        """Wirklich beenden (über Tray)."""
+        global _active_config
+        if self.active_config:
+            disconnect_vpn(self.active_config)
+        _active_config = None
+        self.active_config = None
+        self._stop_auto_refresh()
+        self._save_settings()
+        _cleanup_temp_rdp()
+        if self._tray:
+            self._tray.hide()
+        QApplication.quit()
+
     # ── Close Event ────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        # Bei verbundenem VPN: In Tray minimieren statt schließen
+        if self.vpn_connected and self._tray and self._tray.isVisible():
+            self.hide()
+            self._tray.showMessage(
+                "VPN Connect",
+                "App läuft im Hintergrund weiter.\nDoppelklick auf Tray-Icon zum Öffnen.",
+                QSystemTrayIcon.MessageIcon.Information, 3000)
+            event.ignore()
+            return
+
         global _active_config
         if self.active_config:
             reply = QMessageBox.question(
@@ -1654,7 +1938,10 @@ class VPNApp(QMainWindow):
         _active_config = None
         self.active_config = None
         self._stop_auto_refresh()
+        self._save_settings()
         _cleanup_temp_rdp()
+        if self._tray:
+            self._tray.hide()
         event.accept()
 
 
