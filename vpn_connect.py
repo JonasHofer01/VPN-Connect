@@ -17,16 +17,17 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QListWidget, QFrame,
     QScrollArea, QTextEdit, QMessageBox, QSystemTrayIcon, QMenu,
-    QCheckBox,
+    QCheckBox, QDialog, QFormLayout, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QFont, QColor, QPainter, QAction, QPixmap, QIcon
+from PyQt6.QtGui import QKeySequence, QShortcut
 
 # =============================================================================
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -787,6 +788,8 @@ class AppSignals(QObject):
     ping_result_signal = pyqtSignal(str)              # "{ms} ms" or "---"
     reconnect_signal = pyqtSignal()                   # trigger auto-reconnect
     auto_login_signal = pyqtSignal()                  # trigger upsnap auto-login
+    vpn_ip_signal = pyqtSignal(str)                   # VPN tunnel IP
+    history_updated_signal = pyqtSignal()
 
 
 # =============================================================================
@@ -841,6 +844,14 @@ class VPNApp(QMainWindow):
         self.setWindowTitle(f"VPN Connect  v{APP_VERSION}")
         self.setMinimumSize(800, 520)
         self.resize(800, 560)
+        self.setToolTip(
+            "Tastaturkuerzel:\n"
+            "  Strg+K   Verbinden\n"
+            "  Strg+D   Trennen\n"
+            "  Strg+R   Geraete aktualisieren\n"
+            "  Strg+L   Log ein/aus\n"
+            "  Strg+H   Verlauf ein/aus"
+        )
 
         self.configs: List[Tuple[str, str]] = []
         self.active_config: Optional[str] = None
@@ -849,6 +860,11 @@ class VPNApp(QMainWindow):
         self._device_widgets: List[QWidget] = []
         self._log_visible = False
         self._update_info: Optional[dict] = None
+        self._history_visible = False
+        self._session_start_time: float = 0
+        self._session_config_name: str = ""
+        self._favorites: List[str] = []        # device IDs
+        self._rdp_users: dict = {}             # device_name -> username
 
         # Connection duration
         self._connect_time: float = 0
@@ -914,6 +930,8 @@ class VPNApp(QMainWindow):
         self.sig.ping_result_signal.connect(self._update_ping_label)
         self.sig.reconnect_signal.connect(self._on_auto_reconnect)
         self.sig.auto_login_signal.connect(self._try_auto_login)
+        self.sig.vpn_ip_signal.connect(self._update_ip_label)
+        self.sig.history_updated_signal.connect(self._refresh_history_ui)
 
     # ── Layout ─────────────────────────────────────────────────────────────
 
@@ -964,6 +982,15 @@ class VPNApp(QMainWindow):
         self.ping_label.setStyleSheet(f"color: {C['dim']};")
         self.ping_label.hide()
         hdr.addWidget(self.ping_label)
+        hdr.addSpacing(14)
+
+        # VPN-IP Label
+        self.vpn_ip_label = QLabel("")
+        self.vpn_ip_label.setFont(QFont("Consolas", 10))
+        self.vpn_ip_label.setStyleSheet(f"color: {C['cyan']};")
+        self.vpn_ip_label.setToolTip("VPN-Tunnel IP-Adresse")
+        self.vpn_ip_label.hide()
+        hdr.addWidget(self.vpn_ip_label)
         hdr.addSpacing(14)
 
         # Status
@@ -1141,7 +1168,53 @@ class VPNApp(QMainWindow):
         self.log_frame.hide()
         main_layout.addWidget(self.log_frame)
 
+        # ── Verbindungshistorie ──
+        self.history_toggle = QPushButton("[+] Verbindungshistorie")
+        self.history_toggle.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C['dim']};
+                border: none; font-size: 9pt; padding: 4px 2px;
+                text-align: left;
+            }}
+            QPushButton:hover {{ color: {C['fg']}; }}
+        """)
+        self.history_toggle.clicked.connect(self._toggle_history)
+        main_layout.addWidget(self.history_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.history_frame = QFrame()
+        self.history_frame.setStyleSheet(f"background-color: {C['card']}; border-radius: 6px;")
+        hist_layout = QVBoxLayout(self.history_frame)
+        hist_layout.setContentsMargins(8, 8, 8, 8)
+        hist_layout.setSpacing(4)
+        self.history_list_widget = QWidget()
+        self.history_list_layout = QVBoxLayout(self.history_list_widget)
+        self.history_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.history_list_layout.setSpacing(2)
+        hist_layout.addWidget(self.history_list_widget)
+        btn_clear_hist = QPushButton("Verlauf leeren")
+        btn_clear_hist.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C['dim']};
+                border: none; font-size: 8pt; padding: 2px;
+                text-align: right;
+            }}
+            QPushButton:hover {{ color: {C['red']}; }}
+        """)
+        btn_clear_hist.clicked.connect(self._clear_history)
+        hist_layout.addWidget(btn_clear_hist, alignment=Qt.AlignmentFlag.AlignRight)
+        self.history_frame.hide()
+        main_layout.addWidget(self.history_frame)
+
         main_layout.addStretch()
+
+        # ── Tastaturkürzel ──
+        QShortcut(QKeySequence("Ctrl+K"), self).activated.connect(
+            lambda: self._on_connect() if not self.vpn_connected else None)
+        QShortcut(QKeySequence("Ctrl+D"), self).activated.connect(
+            lambda: self._on_disconnect() if self.vpn_connected else None)
+        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(self._on_refresh_devices)
+        QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._toggle_log)
+        QShortcut(QKeySequence("Ctrl+H"), self).activated.connect(self._toggle_history)
 
     # ── Status ─────────────────────────────────────────────────────────────
 
@@ -1317,6 +1390,19 @@ class VPNApp(QMainWindow):
         # Config-Auswahl speichern
         self._save_settings()
 
+        # Verbindungshistorie starten
+        sel = self.config_listbox.currentRow()
+        self._session_config_name = self.configs[sel][0].strip() if self.configs and sel >= 0 else "?"
+        self._session_start_time = time.time()
+
+        # VPN-IP ermitteln
+        if self.active_config:
+            tn = extract_tunnel_name(self.active_config)
+            threading.Thread(target=self._fetch_vpn_ip, args=(tn,), daemon=True).start()
+
+        # Toast-Benachrichtigung
+        self._notify("VPN verbunden", f"{self._session_config_name} – Verbunden!")
+
         # Tray-Tooltip
         if hasattr(self, '_tray') and self._tray:
             self._tray.setToolTip(f"VPN Connect - Verbunden")
@@ -1341,7 +1427,17 @@ class VPNApp(QMainWindow):
         self.duration_label.hide()
         self._ping_timer.stop()
         self.ping_label.hide()
+        self.vpn_ip_label.hide()
         self._watchdog_timer.stop()
+
+        # History-Eintrag abschließen
+        if self._session_start_time > 0:
+            duration = int(time.time() - self._session_start_time)
+            self._add_history_entry(self._session_config_name, self._session_start_time, duration)
+            self._session_start_time = 0
+
+        # Toast
+        self._notify("VPN getrennt", "Verbindung wurde beendet.")
 
         # Tray-Tooltip
         if hasattr(self, '_tray') and self._tray:
@@ -1399,13 +1495,23 @@ class VPNApp(QMainWindow):
         u = self.entry_user.text().strip()
         p = self.entry_pass.text().strip()
         try:
-            data = {
+            # Bestehende Daten laden (History usw. erhalten)
+            data = {}
+            if os.path.exists(self._CRED_FILE):
+                try:
+                    with open(self._CRED_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            data.update({
                 "v": 2,
                 "user": u,
                 "pw_b64": base64.b64encode(p.encode("utf-8")).decode("ascii") if p else "",
                 "last_config": self.config_listbox.currentRow(),
                 "auto_reconnect": self.chk_auto_reconnect.isChecked(),
-            }
+                "favorites": self._favorites,
+                "rdp_users": self._rdp_users,
+            })
             with open(self._CRED_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except OSError:
@@ -1431,7 +1537,6 @@ class VPNApp(QMainWindow):
                 self.entry_pass.setText(pw)
             elif d.get("pw"):
                 self.entry_pass.setText(d["pw"])
-                # Migration zu v2
                 QTimer.singleShot(500, self._save_settings)
 
             # Letzte Config
@@ -1441,6 +1546,10 @@ class VPNApp(QMainWindow):
 
             # Auto-Reconnect
             self.chk_auto_reconnect.setChecked(d.get("auto_reconnect", False))
+
+            # Favoriten & RDP-User
+            self._favorites = d.get("favorites", [])
+            self._rdp_users = d.get("rdp_users", {})
 
         except Exception:
             pass
@@ -1562,7 +1671,12 @@ class VPNApp(QMainWindow):
             self.btn_login.setEnabled(True)
             return
 
-        for d in devices:
+        # Favoriten zuerst sortieren
+        def _sort_key(dev):
+            return (0 if dev.get("id", "") in self._favorites else 1, dev.get("name", ""))
+        devices_sorted = sorted(devices, key=_sort_key)
+
+        for d in devices_sorted:
             row = QFrame()
             row.setStyleSheet(f"""
                 QFrame {{ background-color: {C['surface']}; border-radius: 4px; }}
@@ -1602,13 +1716,29 @@ class VPNApp(QMainWindow):
             did, dip, dn = d.get("id", ""), ip, name
             btn_refs: List[QPushButton] = []
 
+            # Favoriten-Stern
+            is_fav = did in self._favorites
+            star_col = C["yellow"] if is_fav else C["dim"]
+            star_btn = QPushButton("★" if is_fav else "☆")
+            star_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {star_col};
+                    border: none; font-size: 14pt; padding: 0 4px;
+                }}
+                QPushButton:hover {{ color: {C['yellow']}; }}
+            """)
+            star_btn.setToolTip("Favorit")
+            star_btn.clicked.connect(
+                lambda checked, x=did, b=star_btn: self._toggle_favorite(x, b))
+            row_layout.addWidget(star_btn)
+
             if online:
                 b = _make_btn("RDP", C["surface"], C["fg"], C["border"])
                 b.setStyleSheet(b.styleSheet().replace(
                     "font-weight: bold;", "font-weight: normal; font-size: 9pt;"))
                 b.clicked.connect(
                     lambda checked, x=dip, n=dn, bl=btn_refs, sl=status_lbl:
-                    self._on_rdp(x, n, bl, sl))
+                    self._on_rdp_with_user(x, n, bl, sl))
                 row_layout.addWidget(b)
                 btn_refs.append(b)
             else:
@@ -1684,13 +1814,21 @@ class VPNApp(QMainWindow):
         def work():
             self.upsnap.wake(did)
             self.sig.device_status_signal.emit(status_lbl, "Einschalten...", C["orange"])
+            self._notify("Wake-on-LAN", f"'{name}' wird aufgeweckt...")
             QTimer.singleShot(3000, lambda: self.sig.btns_state_signal.emit(btn_refs, True))
             QTimer.singleShot(3000, lambda: self.sig.device_status_signal.emit(
                 status_lbl, "Offline", C["dim"]))
         threading.Thread(target=work, daemon=True).start()
 
+    def _on_rdp_with_user(self, ip: str, name: str,
+                           btn_refs: list = None, status_lbl: QLabel = None):
+        """RDP mit optionalem Benutzernamen-Dialog."""
+        user = self._ask_rdp_user(name)
+        self._on_rdp(ip, name, btn_refs, status_lbl, username=user)
+
     def _on_rdp(self, ip: str, name: str,
-                btn_refs: list = None, status_lbl: QLabel = None):
+                btn_refs: list = None, status_lbl: QLabel = None,
+                username: Optional[str] = None):
         log(f"RDP -> '{name}' ({ip})")
         if btn_refs:
             self._set_btns(btn_refs, False)
@@ -1703,6 +1841,8 @@ class VPNApp(QMainWindow):
                 f.write(f"full address:s:{ip}\n")
                 f.write("prompt for credentials:i:1\n")
                 f.write("authentication level:i:0\n")
+                if username:
+                    f.write(f"username:s:{username}\n")
             subprocess.Popen(["explorer.exe", rdp_path])
             log(f"RDP gestartet: {rdp_path}")
             if status_lbl:
@@ -1842,12 +1982,214 @@ class VPNApp(QMainWindow):
     def _on_auto_reconnect(self):
         if self._reconnect_retries >= 3:
             log("Auto-Reconnect: Max. Versuche (3) erreicht.", "error")
+            self._notify("Auto-Reconnect", "Verbindung konnte nicht wiederhergestellt werden.")
             self._disconnected()
             return
         self._reconnect_retries += 1
         log(f"Auto-Reconnect: Versuch {self._reconnect_retries}/3...")
         self._set_status(f"Reconnect {self._reconnect_retries}/3...", C["orange"])
+        self._notify("Auto-Reconnect", f"Verbindung verloren – Versuch {self._reconnect_retries}/3...")
         self._on_connect()
+
+    # ── Benachrichtigungen ────────────────────────────────────────────────
+
+    def _notify(self, title: str, msg: str):
+        """Toast-Benachrichtigung via System-Tray."""
+        if hasattr(self, '_tray') and self._tray and self._tray.isVisible():
+            self._tray.showMessage(title, msg,
+                                   QSystemTrayIcon.MessageIcon.Information, 3000)
+
+    # ── VPN-IP ────────────────────────────────────────────────────────────
+
+    def _fetch_vpn_ip(self, tunnel_name: str):
+        """VPN-Tunnel-IP im Hintergrund ermitteln."""
+        try:
+            r = _run_silent(
+                ["netsh", "interface", "ip", "show", "address", tunnel_name],
+                capture_output=True, text=True, timeout=5)
+            for line in r.stdout.splitlines():
+                line = line.strip()
+                if "IP-Adresse" in line or "IP Address" in line:
+                    ip = line.split(":")[-1].strip()
+                    if ip:
+                        self.sig.vpn_ip_signal.emit(ip)
+                        return
+        except Exception:
+            pass
+        self.sig.vpn_ip_signal.emit("")
+
+    def _update_ip_label(self, ip: str):
+        if ip:
+            self.vpn_ip_label.setText(f"IP: {ip}")
+            self.vpn_ip_label.show()
+        else:
+            self.vpn_ip_label.hide()
+
+    # ── Verbindungshistorie ───────────────────────────────────────────────
+
+    def _add_history_entry(self, config: str, start_ts: float, duration_s: int):
+        """Verbindung in den Verlauf eintragen."""
+        import datetime
+        entry = {
+            "config": config,
+            "start": datetime.datetime.fromtimestamp(start_ts).strftime("%d.%m.%Y %H:%M"),
+            "duration_s": duration_s,
+        }
+        try:
+            path = self._CRED_FILE
+            data: dict = {}
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            hist = data.get("history", [])
+            hist.insert(0, entry)
+            data["history"] = hist[:20]  # max 20 Einträge
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            self.sig.history_updated_signal.emit()
+        except Exception:
+            pass
+
+    def _toggle_history(self):
+        if self._history_visible:
+            self.history_frame.hide()
+            self.history_toggle.setText("[+] Verbindungshistorie")
+            self._history_visible = False
+        else:
+            self.history_frame.show()
+            self.history_toggle.setText("[-] Verbindungshistorie")
+            self._history_visible = True
+            self._refresh_history_ui()
+
+    def _refresh_history_ui(self):
+        """History-Liste neu aufbauen."""
+        # Alte Widgets entfernen
+        while self.history_list_layout.count():
+            w = self.history_list_layout.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        try:
+            if not os.path.exists(self._CRED_FILE):
+                return
+            with open(self._CRED_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            hist = data.get("history", [])
+            if not hist:
+                lbl = QLabel("Kein Verlauf vorhanden.")
+                lbl.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+                self.history_list_layout.addWidget(lbl)
+                return
+            for entry in hist:
+                d = entry.get("duration_s", 0)
+                h, m, s = d // 3600, (d % 3600) // 60, d % 60
+                dur_str = f"{h:02d}:{m:02d}:{s:02d}"
+                text = f"{entry.get('start','?')}  •  {entry.get('config','?')}  •  {dur_str}"
+                row = QLabel(text)
+                row.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; padding: 2px 4px;")
+                self.history_list_layout.addWidget(row)
+        except Exception:
+            pass
+
+    def _clear_history(self):
+        try:
+            if os.path.exists(self._CRED_FILE):
+                with open(self._CRED_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                data["history"] = []
+                with open(self._CRED_FILE, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+            self._refresh_history_ui()
+        except Exception:
+            pass
+
+    # ── Favoriten ─────────────────────────────────────────────────────────
+
+    def _load_favorites_and_rdp_users(self):
+        """Favoriten und RDP-Benutzernamen aus Settings laden."""
+        try:
+            if os.path.exists(self._CRED_FILE):
+                with open(self._CRED_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._favorites = data.get("favorites", [])
+                self._rdp_users = data.get("rdp_users", {})
+        except Exception:
+            pass
+
+    def _save_favorites(self):
+        try:
+            data = {}
+            if os.path.exists(self._CRED_FILE):
+                with open(self._CRED_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            data["favorites"] = self._favorites
+            data["rdp_users"] = self._rdp_users
+            with open(self._CRED_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def _toggle_favorite(self, device_id: str, star_btn: QPushButton):
+        if device_id in self._favorites:
+            self._favorites.remove(device_id)
+            star_btn.setText("☆")
+            star_btn.setStyleSheet(star_btn.styleSheet().replace(
+                C["yellow"], C["dim"]).replace(C["orange"], C["dim"]))
+        else:
+            self._favorites.append(device_id)
+            star_btn.setText("★")
+            star_btn.setStyleSheet(star_btn.styleSheet().replace(
+                C["dim"], C["yellow"]))
+        self._save_favorites()
+
+    # ── RDP-Benutzername Dialog ────────────────────────────────────────────
+
+    def _ask_rdp_user(self, device_name: str) -> Optional[str]:
+        """Dialog zum Eingeben/Bestätigen des RDP-Benutzernamens."""
+        saved = self._rdp_users.get(device_name, "")
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"RDP – {device_name}")
+        dlg.setStyleSheet(f"background-color: {C['card']}; color: {C['fg']};")
+        layout = QFormLayout(dlg)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        user_edit = QLineEdit(saved)
+        user_edit.setPlaceholderText("domain\\benutzername oder benutzername")
+        user_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background: {C['surface']}; color: {C['fg']};
+                border: 1px solid {C['border']}; border-radius: 4px; padding: 5px 8px;
+            }}
+        """)
+        layout.addRow(QLabel("Benutzername:"), user_edit)
+
+        chk_save = QCheckBox("Benutzername merken")
+        chk_save.setChecked(bool(saved))
+        chk_save.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        layout.addRow("", chk_save)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setStyleSheet(
+            f"background: {C['accent']}; color: #fff; border-radius: 4px; padding: 6px 14px;")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setStyleSheet(
+            f"background: {C['surface']}; color: {C['fg']}; border-radius: 4px; padding: 6px 14px;")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addRow(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        user = user_edit.text().strip()
+        if chk_save.isChecked() and user:
+            self._rdp_users[device_name] = user
+            self._save_favorites()
+        elif not chk_save.isChecked() and device_name in self._rdp_users:
+            del self._rdp_users[device_name]
+            self._save_favorites()
+
+        return user or None
 
     # ── System Tray ───────────────────────────────────────────────────────
 
