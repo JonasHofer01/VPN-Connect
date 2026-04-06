@@ -11,13 +11,23 @@ Eine Windows-Desktop-App zum Verbinden mit WireGuard VPN, Wake-on-LAN via UpSnap
 - **UpSnap Integration** – Geräte per Wake-on-LAN aufwecken
 - **RDP** – Remote-Desktop direkt aus der App starten
 - **Auto-Update** – Neue Versionen werden automatisch von GitHub heruntergeladen
-- **Einzelne EXE** – Kein Python-Installation nötig
 
 ## Installation
 
+### Variante A: EXE (empfohlen)
+
 1. Lade die neueste `VPN_Connect.exe` von den [Releases](https://github.com/JonasHofer01/VPN-Connect/releases) herunter
 2. Doppelklick → UAC-Prompt bestätigen (Admin-Rechte nötig für WireGuard)
-3. Fertig!
+
+> **Hinweis:** Falls Smart App Control aktiv ist, kann die EXE blockiert werden.
+> In dem Fall: Windows-Sicherheit → App- & Browsersteuerung → Smart App Control → **Aus**.
+> Alternativ den `VPN_Connect.vbs` Launcher nutzen (verwendet das signierte `pythonw.exe`).
+
+### Variante B: Python-Skript
+
+1. Python 3.12+ installieren
+2. `pip install PyQt6`
+3. `VPN_Connect.vbs` doppelklicken oder `pythonw.exe vpn_connect.py` ausführen
 
 ## Entwicklung
 
@@ -31,21 +41,32 @@ python -m venv .venv
 .venv\Scripts\activate
 
 # Abhängigkeiten installieren
-pip install pyinstaller
+pip install -r requirements.txt
+
+# App starten
+python vpn_connect.py
 
 # EXE bauen
-pyinstaller --onefile --windowed --name VPN_Connect --uac-admin vpn_connect.py
+.\build.ps1
+```
+
+## Projektstruktur
+
+```
+vpn_connect.py      # Hauptprogramm (PyQt6 GUI)
+VPN_Connect.vbs     # Launcher (umgeht Smart App Control)
+build.ps1           # Build-Skript (erstellt EXE via PyInstaller)
+requirements.txt    # Python-Abhängigkeiten
+.github/workflows/  # CI/CD (GitHub Actions)
 ```
 
 ## Release erstellen
 
-Ein neues Release wird automatisch gebaut, wenn ein Git-Tag gepusht wird:
-
 ```bash
-# Version in vpn_connect.py anpassen (APP_VERSION = "1.1.0")
+# Version in vpn_connect.py anpassen (APP_VERSION = "1.3.0")
 git add -A
-git commit -m "Release v1.1.0"
-git tag v1.1.0
+git commit -m "Release v1.3.0"
+git tag v1.3.0
 git push origin main --tags
 ```
 
@@ -54,9 +75,8 @@ GitHub Actions baut dann automatisch die EXE und erstellt ein Release.
 ## Voraussetzungen
 
 - [WireGuard](https://www.wireguard.com/install/) muss installiert sein
-- `.conf`-Dateien im selben Ordner wie die EXE oder unter `C:\Program Files\WireGuard\Data\Configurations`
+- `.conf`-Dateien im selben Ordner oder unter `C:\Program Files\WireGuard\Data\Configurations`
 
 ## Lizenz
 
 MIT
-
