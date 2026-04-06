@@ -446,10 +446,14 @@ class UpSnapClient:
     def __init__(self, base_url: str, user: str = "", pw: str = ""):
         self.base_url = base_url.rstrip("/")
         self.token: Optional[str] = None
+        self._user = user
+        self._pw = pw
+        self._last_status: int = 0          # letzter HTTP-Statuscode
         if user and pw:
             self._auth(user, pw)
 
-    def _req(self, method: str, path: str, data: Optional[dict] = None) -> Optional[dict]:
+    def _req(self, method: str, path: str, data: Optional[dict] = None,
+             silent: bool = False) -> Optional[dict]:
         url = f"{self.base_url}{path}"
         hdr = {"Content-Type": "application/json"}
         if self.token:
@@ -458,11 +462,16 @@ class UpSnapClient:
         r = request.Request(url, data=body, headers=hdr, method=method)
         try:
             with request.urlopen(r, timeout=10) as resp:
+                self._last_status = resp.status
                 return json.loads(resp.read().decode("utf-8"))
         except error.HTTPError as e:
-            log(f"UpSnap {e.code}: {e.reason}", "warning")
+            self._last_status = e.code
+            if not silent:
+                log(f"UpSnap {e.code}: {e.reason}", "warning")
         except Exception as e:
-            log(f"UpSnap Fehler: {e}", "warning")
+            self._last_status = 0
+            if not silent:
+                log(f"UpSnap Fehler: {e}", "warning")
         return None
 
     def _auth(self, user: str, pw: str) -> bool:
@@ -480,9 +489,20 @@ class UpSnapClient:
         log("UpSnap: Login fehlgeschlagen.", "error")
         return False
 
-    def get_devices(self) -> List[dict]:
-        r = self._req("GET", "/api/collections/devices/records")
-        return r.get("items", []) if r else []
+    def reauth(self) -> bool:
+        """Token erneuern (nach Ablauf / 401)."""
+        if not self._user or not self._pw:
+            return False
+        log("UpSnap: Token erneuern...")
+        return self._auth(self._user, self._pw)
+
+    def get_devices(self) -> Optional[List[dict]]:
+        """Geräteliste holen.
+        Gibt None zurück bei API-Fehler (Netz, Token), [] bei leerer Liste."""
+        r = self._req("GET", "/api/collections/devices/records", silent=True)
+        if r is None:
+            return None          # Fehler – Display NICHT leeren
+        return r.get("items", [])
 
     def wake(self, did: str) -> bool:
         r = self._req("GET", f"/api/upsnap/wake/{did}")
@@ -867,6 +887,7 @@ class VPNApp(QMainWindow):
         self._rdp_users: dict = {}             # device_name -> username
         self._devices_hash: str = ""           # Hash der Geräteliste (Smart-Refresh)
         self._active_ops: set = set()          # Device-IDs mit laufenden Operationen
+        self._refresh_in_progress: bool = False  # verhindert parallele API-Aufrufe
 
         # Debounce-Timer für Settings (verhindert zu häufiges Schreiben bei schnellen Änderungen)
         self._save_timer = QTimer(self)
@@ -1479,6 +1500,8 @@ class VPNApp(QMainWindow):
         self._watchdog_timer.stop()
         self._transfer_timer.stop()
         self.transfer_label.hide()
+        self._stop_auto_refresh()
+        self._refresh_in_progress = False
         self._active_ops.clear()
 
         # History-Eintrag abschließen
@@ -1644,14 +1667,32 @@ class VPNApp(QMainWindow):
         self._auto_refresh_timer.stop()
 
     def _auto_refresh_tick(self):
-        if self.upsnap and self.vpn_connected:
-            def work():
-                try:
-                    devs = self.upsnap.get_devices()
+        if not self.upsnap or not self.vpn_connected:
+            return
+        if self._refresh_in_progress:
+            return                              # vorherigen Aufruf abwarten
+        self._refresh_in_progress = True
+
+        def work():
+            try:
+                devs = self.upsnap.get_devices()
+                if devs is not None:
+                    # Erfolg – Geräteliste aktualisieren
                     self.sig.show_devices_signal.emit(devs)
-                except Exception:
-                    pass
-            threading.Thread(target=work, daemon=True).start()
+                elif self.upsnap._last_status in (401, 403):
+                    # Token abgelaufen → automatisch neu anmelden
+                    log("UpSnap Token abgelaufen – erneuere...", "warning")
+                    if self.upsnap.reauth():
+                        devs2 = self.upsnap.get_devices()
+                        if devs2 is not None:
+                            self.sig.show_devices_signal.emit(devs2)
+                # devs is None ohne 401 = Netzwerkfehler → Display unverändert lassen
+            except Exception:
+                pass
+            finally:
+                self._refresh_in_progress = False
+
+        threading.Thread(target=work, daemon=True).start()
 
     # ── UpSnap Login ───────────────────────────────────────────────────────
 
@@ -1700,6 +1741,7 @@ class VPNApp(QMainWindow):
         self.upsnap = None
         self._stop_auto_refresh()
         self._devices_hash = ""
+        self._refresh_in_progress = False
 
         # Geräte-Widgets entfernen
         for w in self._device_widgets:
@@ -2108,7 +2150,11 @@ class VPNApp(QMainWindow):
     def _try_auto_login(self):
         """Nach VPN-Connect automatisch bei UpSnap anmelden, wenn Credentials vorhanden."""
         if self.upsnap is not None:
-            return  # Bereits angemeldet
+            # Bereits eingeloggt → Timer sicherstellen + sofortigen Refresh auslösen
+            if not self._auto_refresh_timer.isActive():
+                self._start_auto_refresh()
+            self._auto_refresh_tick()
+            return
         u = self.entry_user.text().strip()
         p = self.entry_pass.text().strip()
         if u and p and self.vpn_connected:
