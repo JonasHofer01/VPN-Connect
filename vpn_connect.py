@@ -2606,8 +2606,8 @@ class VPNApp(QMainWindow):
 def main():
     global _app
 
-    if "--cleanup" in sys.argv:
-        _cleanup_old_exe()
+    # Immer beim Start aufräumen – löscht .old-Datei von vorherigem Update
+    _cleanup_old_exe()
 
     if not is_admin():
         run_as_admin()
