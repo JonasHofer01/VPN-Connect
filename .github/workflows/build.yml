@@ -3,7 +3,7 @@ name: Build & Release
 on:
   push:
     tags:
-      - "v1.9.0"
+      - "v*"
   workflow_dispatch:
 
 permissions:
