@@ -28,6 +28,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Smoke test (syntax)
+        run: python -m py_compile vpn_connect.py
+
+      - name: Import test
+        run: python - <<'PY'
+import vpn_connect
+print("import ok")
+PY
+
       - name: Build EXE
         run: |
           pyinstaller --onefile --windowed --name VPN_Connect --uac-admin vpn_connect.py

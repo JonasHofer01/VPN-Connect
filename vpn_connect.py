@@ -8,9 +8,14 @@ import signal
 import atexit
 import json
 import logging
+import logging.handlers
 import threading
 import base64
 import hashlib
+import ipaddress
+import datetime
+import zipfile
+import shutil
 from typing import Optional, List, Tuple
 from urllib import request, error
 
@@ -20,7 +25,8 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QListWidget, QFrame,
     QScrollArea, QTextEdit, QMessageBox, QSystemTrayIcon, QMenu,
-    QCheckBox, QDialog, QFormLayout, QDialogButtonBox,
+    QCheckBox, QDialog, QFormLayout, QDialogButtonBox, QComboBox,
+    QTabWidget, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QFont, QColor, QPainter, QAction, QPixmap, QIcon
@@ -73,22 +79,40 @@ else:
 
 log_file = os.path.join(_base_dir, "vpn_debug.log")
 
-try:
-    if os.path.exists(log_file) and os.path.getsize(log_file) > 1_000_000:
-        os.remove(log_file)
-except OSError:
-    pass
+_dpapi_warned = False
 
-logging.basicConfig(filename=log_file, level=logging.DEBUG,
-                    format="%(asctime)s - %(levelname)s - %(message)s")
+
+def _setup_logging():
+    logger = logging.getLogger("vpn_connect")
+    logger.setLevel(logging.DEBUG)
+    if logger.handlers:
+        return logger
+    try:
+        handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    except Exception:
+        logging.basicConfig(filename=log_file, level=logging.DEBUG,
+                            format="%(asctime)s - %(levelname)s - %(message)s")
+        logger = logging.getLogger("vpn_connect")
+    logger.propagate = False
+    return logger
+
+
+logger = _setup_logging()
 
 _app: Optional["VPNApp"] = None
 
 
 def log(msg: str, level: str = "info") -> None:
-    getattr(logging, level, logging.info)(msg)
+    getattr(logger, level, logger.info)(msg)
     if _app:
         _app.sig.log_signal.emit(msg)
+        if level in ("warning", "error"):
+            title = "Warnung" if level == "warning" else "Fehler"
+            _app.sig.alert_signal.emit(title, msg, level)
 
 
 # =============================================================================
@@ -119,7 +143,10 @@ def _dpapi_protect(text: str) -> str:
             ctypes.windll.kernel32.LocalFree(blob_out.pbData)
             return base64.b64encode(buf).decode("ascii")
     except Exception:
-        pass
+        global _dpapi_warned
+        if not _dpapi_warned:
+            log("DPAPI Schutz fehlgeschlagen – Passwörter werden nicht gespeichert.", "warning")
+            _dpapi_warned = True
     return ""
 
 
@@ -173,6 +200,33 @@ def run_as_admin() -> None:
 def _run_silent(cmd: list, **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, startupinfo=STARTUPINFO,
                           creationflags=CREATE_NO_WINDOW, **kw)
+
+
+def _default_gateway() -> Optional[str]:
+    """Best effort Default-Gateway (IPv4) via 'route print'."""
+    try:
+        r = _run_silent(["route", "print", "0.0.0.0"],
+                        capture_output=True, text=True, timeout=5)
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and parts[0] == "0.0.0.0":
+                return parts[2]
+    except Exception:
+        pass
+    return None
+
+
+def _parse_networks(items: List[str]) -> List[ipaddress._BaseNetwork]:
+    nets = []
+    for item in items:
+        try:
+            if "/" in item:
+                nets.append(ipaddress.ip_network(item, strict=False))
+            else:
+                nets.append(ipaddress.ip_network(item + "/32", strict=False))
+        except Exception:
+            continue
+    return nets
 
 
 def extract_tunnel_name(config_path: str) -> str:
@@ -670,6 +724,10 @@ def check_for_update() -> Optional[dict]:
                 except Exception as e:
                     log(f"SHA256 konnte nicht geladen werden: {e}", "warning")
 
+            if not sha_hex:
+                log("Kein SHA256-Hash im Release gefunden – Update abgebrochen.", "error")
+                return None
+
             log(f"Update verfügbar: {remote_tag} (aktuell: {APP_VERSION})")
             return {
                 "tag": remote_tag,
@@ -729,6 +787,10 @@ def download_update(url: str, dest: str, progress_cb=None,
             log(f"SHA256 stimmt nicht überein (erwartet {expected_sha}, erhalten {file_sha})", "error")
             os.remove(dest)
             return False
+        if expected_sha is None:
+            log("Kein Hash angegeben – Sicherheitscheck schlägt fehl.", "error")
+            os.remove(dest)
+            return False
 
         log(f"Download abgeschlossen: {dest} (SHA256 {file_sha})")
         return True
@@ -747,6 +809,18 @@ def apply_update(new_exe: str) -> None:
         return
     if not os.path.exists(new_exe):
         log(f"Update-Datei fehlt: {new_exe}", "error")
+        return
+
+    # Signatur prüfen
+    try:
+        r = _run_silent(["signtool", "verify", "/pa", new_exe],
+                        capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            log(f"Signaturprüfung fehlgeschlagen: {r.stdout or r.stderr}", "error")
+            return
+        log("Signaturprüfung erfolgreich.")
+    except Exception as e:
+        log(f"Signaturprüfung konnte nicht ausgeführt werden: {e}", "error")
         return
 
     current = sys.executable
@@ -824,26 +898,26 @@ def _cleanup_old_exe():
 # =============================================================================
 
 C = {
-    # Hintergründe (Layering)
-    "bg":        "#202020",   # App-Hintergrund (Mica-Basis)
-    "card":      "#2B2B2B",   # Karte / erste Ebene
-    "surface":   "#3A3A3A",   # Control-Füllung (Standard)
-    "surface_h": "#444444",   # Control-Füllung (Hover)
+    # Hintergründe (Layering) – tiefer Blauton mit Kontrast
+    "bg":        "#0f172a",
+    "card":      "#111827",
+    "surface":   "#1f2937",
+    "surface_h": "#253248",
     # Rahmen
-    "border":    "#454545",   # Subtiler Rahmen
-    "border_l":  "#5C5C5C",   # Heller Rahmen (Hover/Focus)
+    "border":    "#233043",
+    "border_l":  "#2f3f55",
     # Text
-    "fg":        "#FFFFFF",   # Primärtext
-    "dim":       "#9D9D9D",   # Sekundärtext
-    # System-Akzentfarbe (Win11 dark mode blau)
-    "accent":    "#60CDFF",
-    "accent_h":  "#99EBFF",
+    "fg":        "#e5ecf5",
+    "dim":       "#94a3b8",
+    # Akzent (Cyan/Teal)
+    "accent":    "#22d3ee",
+    "accent_h":  "#67e8f9",
     # Semantische Farben
-    "green":     "#6CCB5F",
-    "red":       "#FF6B6B",
-    "yellow":    "#FCE100",
-    "orange":    "#FF8C00",
-    "cyan":      "#60CDFF",
+    "green":     "#34d399",
+    "red":       "#f87171",
+    "yellow":    "#fbbf24",
+    "orange":    "#fb923c",
+    "cyan":      "#22d3ee",
 }
 
 # =============================================================================
@@ -852,7 +926,8 @@ C = {
 
 GLOBAL_QSS = f"""
 QMainWindow {{
-    background-color: {C['bg']};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #0b1222, stop:0.5 #0f172a, stop:1 #0b1a33);
 }}
 QWidget {{
     color: {C['fg']};
@@ -920,7 +995,7 @@ QListWidget::item {{
     border-radius: 3px;
 }}
 QListWidget::item:selected {{
-    background-color: rgba(96,205,255,0.22);
+    background-color: rgba(34,211,238,0.20);
     color: {C['fg']};
     border-left: 2px solid {C['accent']};
 }}
@@ -941,11 +1016,14 @@ QTextEdit {{
 }}
 /* Schaltflächen (Basis – wird meist durch _make_btn überschrieben) */
 QPushButton {{
-    border-radius: 4px;
-    padding: 7px 16px;
+    border: 1px solid {C['border']};
+    border-radius: 7px;
+    padding: 9px 16px;
     font-size: 9pt;
     font-family: 'Segoe UI Variable Text', 'Segoe UI';
     font-weight: 600;
+    background-color: {C['surface']};
+    color: {C['fg']};
 }}
 QPushButton:disabled {{
     background-color: {C['surface']};
@@ -977,6 +1055,31 @@ QCheckBox::indicator:checked {{
 QCheckBox::indicator:checked:hover {{
     background-color: {C['accent_h']};
     border: 1px solid {C['accent_h']};
+}}
+/* Tabs */
+QTabWidget::pane {{
+    border: 1px solid {C['border']};
+    border-radius: 8px;
+    top: -1px;
+    background: {C['bg']};
+}}
+QTabBar::tab {{
+    background: {C['surface']};
+    color: {C['fg']};
+    padding: 8px 14px;
+    border: 1px solid {C['border']};
+    border-bottom: 0px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    margin-right: 2px;
+}}
+QTabBar::tab:selected {{
+    background: {C['card']};
+    border: 1px solid {C['border_l']};
+    border-bottom: 1px solid {C['card']};
+}}
+QTabBar::tab:hover {{
+    color: {C['accent']};
 }}
 /* Dialoge */
 QDialog {{
@@ -1038,6 +1141,7 @@ class AppSignals(QObject):
     vpn_ip_signal = pyqtSignal(str)                   # VPN tunnel IP
     history_updated_signal = pyqtSignal()
     transfer_signal = pyqtSignal(str)                  # "↓ X MB  ↑ Y MB"
+    alert_signal = pyqtSignal(str, str, str)           # title, msg, level
 
 
 # =============================================================================
@@ -1141,6 +1245,19 @@ class VPNApp(QMainWindow):
         self._last_target_ip: str = TARGET_IP
         self._last_target_port: int = TARGET_PORT
         self._local_ping_tasks: set = set()
+        self._split_excludes: List[str] = []    # CIDR/IP/Domain
+        self._schedule_enable: bool = False
+        self._schedule_connect: str = ""
+        self._schedule_disconnect: str = ""
+        self._last_schedule_day: str = ""
+        self._did_sched_connect: bool = False
+        self._did_sched_disconnect: bool = False
+        self._bw_threshold_mb: int = 0
+        self._bw_alerted: bool = False
+        self._http_check_url: str = ""
+        self._routes_added: List[str] = []
+        self._session_rx: int = 0
+        self._session_tx: int = 0
         self._devices_hash: str = ""           # Hash der Geräteliste (Smart-Refresh)
         self._active_ops: set = set()          # Device-IDs mit laufenden Operationen
         self._refresh_in_progress: bool = False  # verhindert parallele API-Aufrufe
@@ -1161,6 +1278,9 @@ class VPNApp(QMainWindow):
         self._ping_timer = QTimer(self)
         self._ping_timer.setInterval(5000)
         self._ping_timer.timeout.connect(self._ping_tick)
+        self._schedule_timer = QTimer(self)
+        self._schedule_timer.setInterval(30_000)
+        self._schedule_timer.timeout.connect(self._schedule_tick)
 
         # Auto-Reconnect
         self._reconnect_retries = 0
@@ -1181,12 +1301,16 @@ class VPNApp(QMainWindow):
         self._transfer_timer = QTimer(self)
         self._transfer_timer.setInterval(5_000)
         self._transfer_timer.timeout.connect(self._transfer_tick)
+        self._schedule_timer = QTimer(self)
+        self._schedule_timer.setInterval(30_000)
+        self._schedule_timer.timeout.connect(self._schedule_tick)
 
         self._loading = True          # blockiert _save_settings während gesamter Initialisierung
         self._build_ui()
         self._setup_tray()
         self._load_configs()
         self._load_credentials()      # setzt _loading=False am Ende selbst
+        self._schedule_timer.start()
 
         # Update-Check im Hintergrund
         threading.Thread(target=self._check_update_bg, daemon=True).start()
@@ -1222,6 +1346,9 @@ class VPNApp(QMainWindow):
         self.sig.vpn_ip_signal.connect(self._update_ip_label)
         self.sig.history_updated_signal.connect(self._refresh_history_ui)
         self.sig.transfer_signal.connect(self._update_transfer_label)
+        self.sig.status_signal.connect(lambda t, c: self._update_window_title())
+        self.sig.alert_signal.connect(self._on_alert)
+        self._schedule_timer.start()
 
     # ── Layout ─────────────────────────────────────────────────────────────
 
@@ -1238,17 +1365,22 @@ class VPNApp(QMainWindow):
         outer.setStyleSheet(f"background-color: {C['bg']};")
         scroll.setWidget(outer)
         main_layout = QVBoxLayout(outer)
-        main_layout.setContentsMargins(pad, pad, pad, pad)
-        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(8)
 
         # ── Header ──
         hdr = QHBoxLayout()
-        hdr.setContentsMargins(0, 0, 0, 20)
+        hdr.setContentsMargins(0, 0, 0, 10)
 
         title = QLabel("VPN Connect")
         title.setFont(QFont("Segoe UI Variable Display", 22, QFont.Weight.DemiBold))
         title.setStyleSheet(f"color: {C['fg']}; letter-spacing: -0.5px;")
         hdr.addWidget(title)
+
+        subtitle = QLabel("WireGuard · UpSnap · RDP")
+        subtitle.setStyleSheet(f"color: {C['dim']}; font-size: 10pt; letter-spacing: 0.2px;")
+        hdr.addWidget(subtitle)
+        hdr.setSpacing(12)
 
         # Update-Button (initial versteckt)
         self.btn_update = _make_btn("↑  Update verfügbar", C["green"], "#000000", "#8fdf81")
@@ -1305,10 +1437,41 @@ class VPNApp(QMainWindow):
 
         main_layout.addLayout(hdr)
 
-        # ── WireGuard Sektion ──
-        main_layout.addWidget(self._section_label("WireGuard"))
-        main_layout.addSpacing(6)
+        # Tabs
+        tabs = QTabWidget()
+        tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+                background: {C['bg']};
+            }}
+            QTabBar::tab {{
+                background: {C['surface']};
+                color: {C['fg']};
+                padding: 8px 14px;
+                border: 1px solid {C['border']};
+                border-bottom: 0px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 2px;
+            }}
+            QTabBar::tab:selected {{
+                background: {C['card']};
+                color: {C['fg']};
+                border: 1px solid {C['border_l']};
+                border-bottom: 1px solid {C['card']};
+            }}
+        """)
+        main_layout.addWidget(tabs)
 
+        # Haupt-Tab
+        main_tab = QWidget()
+        main_tab_layout = QVBoxLayout(main_tab)
+        main_tab_layout.setContentsMargins(8, 10, 8, 10)
+        main_tab_layout.setSpacing(8)
+
+        # ── WireGuard Sektion ──
+        main_tab_layout.addWidget(self._section_label("WireGuard"))
         wg_card = QFrame()
         wg_card.setStyleSheet(f"""
             QFrame {{
@@ -1317,19 +1480,22 @@ class VPNApp(QMainWindow):
                 border-radius: 8px;
             }}
         """)
+        wg_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        wg_card.setMaximumHeight(100)
         wg_layout = QVBoxLayout(wg_card)
-        wg_layout.setContentsMargins(16, 14, 16, 14)
-        wg_layout.setSpacing(10)
+        wg_layout.setContentsMargins(10, 8, 10, 8)
+        wg_layout.setSpacing(6)
 
         self.config_listbox = QListWidget()
-        self.config_listbox.setMaximumHeight(88)
+        self.config_listbox.setMaximumHeight(50)
         self.config_listbox.itemDoubleClicked.connect(
             lambda: self._on_connect() if not self.vpn_connected else None)
-        self.config_listbox.currentRowChanged.connect(lambda: self._save_settings())
+        self.config_listbox.currentRowChanged.connect(lambda: self._schedule_save())
         wg_layout.addWidget(self.config_listbox)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
+        btn_row.setContentsMargins(0, 2, 0, 0)
 
         self.btn_connect = _make_btn("  Verbinden", C["accent"], "#000000", C["accent_h"])
         self.btn_connect.clicked.connect(self._on_connect)
@@ -1367,23 +1533,92 @@ class VPNApp(QMainWindow):
             }}
         """
 
-        self.chk_auto_reconnect = QCheckBox("Auto-Reconnect bei Verbindungsverlust")
-        self.chk_auto_reconnect.setStyleSheet(chk_qss)
-        self.chk_auto_reconnect.stateChanged.connect(lambda: self._save_settings())
-        wg_layout.addWidget(self.chk_auto_reconnect)
+        # (Checkboxen jetzt im Einstellungen-Tab)
 
-        self.chk_auto_connect = QCheckBox("Automatisch verbinden beim Start")
-        self.chk_auto_connect.setStyleSheet(chk_qss)
-        self.chk_auto_connect.stateChanged.connect(lambda: self._save_settings())
-        wg_layout.addWidget(self.chk_auto_connect)
+        main_tab_layout.addWidget(wg_card)
 
-        main_layout.addWidget(wg_card)
-        main_layout.addSpacing(16)
+        # ── UpSnap / Wake on LAN ──
+        main_tab_layout.addWidget(self._section_label("UpSnap  ·  Wake on LAN"))
 
-        # ── Server / Ziel ──
-        main_layout.addWidget(self._section_label("Server / Ziel"))
-        main_layout.addSpacing(6)
+        snap_card = QFrame()
+        snap_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        snap_layout = QVBoxLayout(snap_card)
+        snap_layout.setContentsMargins(16, 14, 16, 14)
+        snap_layout.setSpacing(10)
 
+        login_row = QHBoxLayout()
+        login_row.setSpacing(8)
+
+        self.lbl_email = QLabel("E-Mail")
+        self.lbl_email.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        login_row.addWidget(self.lbl_email)
+        self.entry_user = QLineEdit()
+        self.entry_user.setFixedWidth(190)
+        self.entry_user.returnPressed.connect(lambda: self.entry_pass.setFocus())
+        self.entry_user.editingFinished.connect(lambda: self._schedule_save())
+        login_row.addWidget(self.entry_user)
+
+        login_row.addSpacing(8)
+
+        self.lbl_pw = QLabel("Passwort")
+        self.lbl_pw.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        login_row.addWidget(self.lbl_pw)
+        self.entry_pass = QLineEdit()
+        self.entry_pass.setFixedWidth(150)
+        self.entry_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        self.entry_pass.returnPressed.connect(self._on_upsnap_login)
+        self.entry_pass.editingFinished.connect(lambda: self._schedule_save())
+        login_row.addWidget(self.entry_pass)
+
+        login_row.addSpacing(8)
+
+        self.btn_login = _make_btn("Anmelden", C["accent"], "#000000", C["accent_h"])
+        self.btn_login.clicked.connect(self._on_upsnap_login)
+        login_row.addWidget(self.btn_login)
+
+        login_row.addStretch()
+        snap_layout.addLayout(login_row)
+
+        # Separator
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background-color: {C['border']}; border: none;")
+        snap_layout.addWidget(sep)
+
+        # Geräte-Info-Zeile
+        self.device_info_label = QLabel("")
+        self.device_info_label.setStyleSheet(f"color: {C['dim']}; font-size: 8pt;")
+        self.device_info_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.device_info_label.hide()
+        snap_layout.addWidget(self.device_info_label)
+
+        # Device-Bereich
+        self.device_frame = QVBoxLayout()
+        self.device_frame.setSpacing(4)
+        self.upsnap_hint = QLabel("Anmelden, um Geräte anzuzeigen")
+        self.upsnap_hint.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; padding: 8px 0;")
+        self.upsnap_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.device_frame.addWidget(self.upsnap_hint)
+        snap_layout.addLayout(self.device_frame)
+
+        main_tab_layout.addWidget(snap_card)
+        # etwas Luft am Ende, aber ohne großen Stretch
+        main_tab_layout.addSpacing(8)
+
+        # Einstellungen-Tab
+        settings_tab = QWidget()
+        settings_layout = QVBoxLayout(settings_tab)
+        settings_layout.setContentsMargins(12, 16, 12, 16)
+        settings_layout.setSpacing(14)
+
+        # Server / Ziel
+        settings_layout.addWidget(self._section_label("Server / Ziel"))
         srv_card = QFrame()
         srv_card.setStyleSheet(f"""
             QFrame {{
@@ -1419,88 +1654,77 @@ class VPNApp(QMainWindow):
         srv_layout.addWidget(self.entry_target_port)
 
         srv_layout.addStretch()
-        main_layout.addWidget(srv_card)
-        main_layout.addSpacing(16)
+        settings_layout.addWidget(srv_card)
 
-        # ── UpSnap / Wake on LAN ──
-        main_layout.addWidget(self._section_label("UpSnap  ·  Wake on LAN"))
-        main_layout.addSpacing(6)
-
-        snap_card = QFrame()
-        snap_card.setStyleSheet(f"""
+        # Verbindung / Verhalten
+        settings_layout.addWidget(self._section_label("Verbindung"))
+        conn_card = QFrame()
+        conn_card.setStyleSheet(f"""
             QFrame {{
                 background-color: {C['card']};
                 border: 1px solid {C['border']};
                 border-radius: 8px;
             }}
         """)
-        snap_layout = QVBoxLayout(snap_card)
-        snap_layout.setContentsMargins(16, 14, 16, 14)
-        snap_layout.setSpacing(10)
+        conn_layout = QVBoxLayout(conn_card)
+        conn_layout.setContentsMargins(16, 12, 16, 12)
+        conn_layout.setSpacing(8)
 
-        login_row = QHBoxLayout()
-        login_row.setSpacing(8)
+        chk_qss = f"""
+            QCheckBox {{ color: {C['dim']}; font-size: 9pt; spacing: 8px; }}
+            QCheckBox::indicator {{
+                width: 16px; height: 16px; border-radius: 3px;
+                border: 1px solid {C['border_l']}; background: transparent;
+            }}
+            QCheckBox::indicator:hover {{
+                border: 1px solid {C['accent']}; background: rgba(96,205,255,0.08);
+            }}
+            QCheckBox::indicator:checked {{
+                background: {C['accent']}; border: 1px solid {C['accent']};
+            }}
+        """
 
-        self.lbl_email = QLabel("E-Mail")
-        self.lbl_email.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
-        login_row.addWidget(self.lbl_email)
-        self.entry_user = QLineEdit()
-        self.entry_user.setFixedWidth(190)
-        self.entry_user.returnPressed.connect(lambda: self.entry_pass.setFocus())
-        self.entry_user.editingFinished.connect(lambda: self._save_settings())
-        login_row.addWidget(self.entry_user)
+        self.chk_auto_reconnect = QCheckBox("Auto-Reconnect bei Verbindungsverlust")
+        self.chk_auto_reconnect.setStyleSheet(chk_qss)
+        self.chk_auto_reconnect.stateChanged.connect(lambda: self._schedule_save())
+        conn_layout.addWidget(self.chk_auto_reconnect)
 
-        login_row.addSpacing(8)
+        self.chk_auto_connect = QCheckBox("Automatisch verbinden beim Start")
+        self.chk_auto_connect.setStyleSheet(chk_qss)
+        self.chk_auto_connect.stateChanged.connect(lambda: self._schedule_save())
+        conn_layout.addWidget(self.chk_auto_connect)
 
-        self.lbl_pw = QLabel("Passwort")
-        self.lbl_pw.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
-        login_row.addWidget(self.lbl_pw)
-        self.entry_pass = QLineEdit()
-        self.entry_pass.setFixedWidth(150)
-        self.entry_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self.entry_pass.returnPressed.connect(self._on_upsnap_login)
-        self.entry_pass.editingFinished.connect(lambda: self._save_settings())
-        login_row.addWidget(self.entry_pass)
+        conn_layout.addStretch()
+        settings_layout.addWidget(conn_card)
 
-        login_row.addSpacing(8)
+        # RDP Auflösung
+        settings_layout.addWidget(self._section_label("RDP-Einstellungen"))
+        rdp_card = QFrame()
+        rdp_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        rdp_layout = QHBoxLayout(rdp_card)
+        rdp_layout.setContentsMargins(16, 12, 16, 12)
+        rdp_layout.setSpacing(12)
 
-        self.btn_login = _make_btn("Anmelden", C["accent"], "#000000", C["accent_h"])
-        self.btn_login.clicked.connect(self._on_upsnap_login)
-        login_row.addWidget(self.btn_login)
+        rdp_layout.addWidget(QLabel("Auflösung"))
+        self.cmb_rdp_res = QComboBox()
+        self.cmb_rdp_res.addItem("Auto", None)
+        for w, h in [(1920, 1080), (1600, 900), (1366, 768), (1280, 720)]:
+            self.cmb_rdp_res.addItem(f"{w} x {h}", (w, h))
+        rdp_layout.addWidget(self.cmb_rdp_res)
+        rdp_layout.addStretch()
+        settings_layout.addWidget(rdp_card)
 
-        login_row.addStretch()
-        snap_layout.addLayout(login_row)
-
-        # Separator
-        sep = QFrame()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background-color: {C['border']}; border: none;")
-        snap_layout.addWidget(sep)
-
-        # Geräte-Info-Zeile
-        self.device_info_label = QLabel("")
-        self.device_info_label.setStyleSheet(f"color: {C['dim']}; font-size: 8pt;")
-        self.device_info_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.device_info_label.hide()
-        snap_layout.addWidget(self.device_info_label)
-
-        # Device-Bereich
-        self.device_frame = QVBoxLayout()
-        self.device_frame.setSpacing(4)
-        self.upsnap_hint = QLabel("Anmelden, um Geräte anzuzeigen")
-        self.upsnap_hint.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; padding: 8px 0;")
-        self.upsnap_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.device_frame.addWidget(self.upsnap_hint)
-        snap_layout.addLayout(self.device_frame)
-
-        main_layout.addWidget(snap_card)
-        main_layout.addSpacing(12)
-
-        # ── Log (Expander) ──
+        # Log (Protokoll)
         self.log_toggle = QPushButton("›  Protokoll")
         self.log_toggle.setStyleSheet(self._expander_btn_qss())
         self.log_toggle.clicked.connect(self._toggle_log)
-        main_layout.addWidget(self.log_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+        settings_layout.addWidget(self.log_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
 
         self.log_frame = QFrame()
         self.log_frame.setStyleSheet(f"""
@@ -1516,18 +1740,18 @@ class VPNApp(QMainWindow):
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QFont("Cascadia Code", 9))
-        self.log_text.setMaximumHeight(200)
+        self.log_text.setMaximumHeight(220)
         log_layout.addWidget(self.log_text)
 
         self.log_frame.hide()
-        main_layout.addWidget(self.log_frame)
-        main_layout.addSpacing(4)
+        settings_layout.addWidget(self.log_frame)
+        settings_layout.addSpacing(6)
 
-        # ── Verbindungshistorie (Expander) ──
+        # Verbindungshistorie
         self.history_toggle = QPushButton("›  Verbindungshistorie")
         self.history_toggle.setStyleSheet(self._expander_btn_qss())
         self.history_toggle.clicked.connect(self._toggle_history)
-        main_layout.addWidget(self.history_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+        settings_layout.addWidget(self.history_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
 
         self.history_frame = QFrame()
         self.history_frame.setStyleSheet(f"""
@@ -1557,9 +1781,118 @@ class VPNApp(QMainWindow):
         btn_clear_hist.clicked.connect(self._clear_history)
         hist_layout.addWidget(btn_clear_hist, alignment=Qt.AlignmentFlag.AlignRight)
         self.history_frame.hide()
-        main_layout.addWidget(self.history_frame)
+        settings_layout.addWidget(self.history_frame)
 
-        main_layout.addStretch()
+        # Split-Tunnel
+        settings_layout.addWidget(self._section_label("Split-Tunnel (Bypass)"))
+        split_card = QFrame()
+        split_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        split_layout = QVBoxLayout(split_card)
+        split_layout.setContentsMargins(16, 12, 16, 12)
+        split_layout.setSpacing(8)
+        split_info = QLabel("CIDR/IP/Domain pro Zeile, wird vom VPN ausgenommen (Route via Standard-Gateway).")
+        split_info.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        split_layout.addWidget(split_info)
+        self.split_text = QTextEdit()
+        self.split_text.setPlaceholderText("z.B.\n192.168.100.0/24\n10.0.0.5\nexample.com")
+        self.split_text.setFixedHeight(100)
+        self.split_text.textChanged.connect(self._on_split_changed)
+        split_layout.addWidget(self.split_text)
+        settings_layout.addWidget(split_card)
+
+        # Zeitplan
+        settings_layout.addWidget(self._section_label("Zeitplan Auto-Connect"))
+        sched_card = QFrame()
+        sched_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        sched_layout = QHBoxLayout(sched_card)
+        sched_layout.setContentsMargins(16, 12, 16, 12)
+        sched_layout.setSpacing(10)
+        self.chk_schedule = QCheckBox("Zeitplan aktivieren")
+        self.chk_schedule.stateChanged.connect(lambda: self._schedule_save())
+        sched_layout.addWidget(self.chk_schedule)
+        sched_layout.addSpacing(8)
+        sched_layout.addWidget(QLabel("Verbinden um"))
+        self.entry_sched_connect = QLineEdit()
+        self.entry_sched_connect.setPlaceholderText("08:00")
+        self.entry_sched_connect.setFixedWidth(70)
+        self.entry_sched_connect.editingFinished.connect(self._schedule_save)
+        sched_layout.addWidget(self.entry_sched_connect)
+        sched_layout.addSpacing(8)
+        sched_layout.addWidget(QLabel("Trennen um"))
+        self.entry_sched_disconnect = QLineEdit()
+        self.entry_sched_disconnect.setPlaceholderText("18:00")
+        self.entry_sched_disconnect.setFixedWidth(70)
+        self.entry_sched_disconnect.editingFinished.connect(self._schedule_save)
+        sched_layout.addWidget(self.entry_sched_disconnect)
+        sched_layout.addStretch()
+        settings_layout.addWidget(sched_card)
+
+        # Bandbreiten-Warnung
+        settings_layout.addWidget(self._section_label("Datenvolumen / Warnung"))
+        bw_card = QFrame()
+        bw_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        bw_layout = QHBoxLayout(bw_card)
+        bw_layout.setContentsMargins(16, 12, 16, 12)
+        bw_layout.setSpacing(10)
+        bw_layout.addWidget(QLabel("Warnen bei über"))
+        self.entry_bw = QLineEdit()
+        self.entry_bw.setPlaceholderText("500")  # MB
+        self.entry_bw.setFixedWidth(80)
+        self.entry_bw.editingFinished.connect(self._on_bw_changed)
+        bw_layout.addWidget(self.entry_bw)
+        bw_layout.addWidget(QLabel("MB (Session)"))
+        bw_layout.addStretch()
+        settings_layout.addWidget(bw_card)
+
+        # HTTP-Check
+        settings_layout.addWidget(self._section_label("HTTP Check"))
+        http_card = QFrame()
+        http_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        http_layout = QHBoxLayout(http_card)
+        http_layout.setContentsMargins(16, 12, 16, 12)
+        http_layout.setSpacing(10)
+        http_layout.addWidget(QLabel("URL"))
+        self.entry_http = QLineEdit()
+        self.entry_http.setPlaceholderText("https://example.com/health")
+        self.entry_http.setFixedWidth(280)
+        self.entry_http.editingFinished.connect(self._on_http_changed)
+        http_layout.addWidget(self.entry_http)
+        http_layout.addStretch()
+        settings_layout.addWidget(http_card)
+
+        # Support-Paket
+        support_btn = _make_btn("  Logs exportieren (ZIP)", C["surface"], C["fg"], C["surface_h"])
+        support_btn.clicked.connect(self._export_support)
+        settings_layout.addWidget(support_btn)
+
+        settings_layout.addStretch()
+
+        tabs.addTab(main_tab, "Haupt")
+        tabs.addTab(settings_tab, "Einstellungen")
 
         # ── Tastaturkürzel ──
         QShortcut(QKeySequence("Ctrl+K"), self).activated.connect(
@@ -1710,6 +2043,7 @@ class VPNApp(QMainWindow):
         log("Installiere Update...")
         if self.active_config:
             disconnect_vpn(self.active_config)
+        self._remove_split_routes()
         apply_update(new_exe)
 
     # ── VPN Connect ────────────────────────────────────────────────────────
@@ -1774,6 +2108,9 @@ class VPNApp(QMainWindow):
         # Transfer-Stats starten
         self._transfer_timer.start()
         self._transfer_tick()
+        self._session_rx = 0
+        self._session_tx = 0
+        self._bw_alerted = False
 
         # Watchdog starten
         self._reconnect_retries = 0
@@ -1792,14 +2129,22 @@ class VPNApp(QMainWindow):
         if self.active_config:
             tn = extract_tunnel_name(self.active_config)
             threading.Thread(target=self._fetch_vpn_ip, args=(tn,), daemon=True).start()
+            self._update_window_title(tn)
+            self._apply_split_routes()
+        else:
+            self._update_window_title()
 
         # Toast-Benachrichtigung
         self._notify("VPN verbunden", f"{self._session_config_name} – Verbunden!")
 
         # Tray-Tooltip
         if hasattr(self, '_tray') and self._tray:
-            self._tray.setToolTip(f"VPN Connect - Verbunden")
+            tip = "VPN Connect - Verbunden"
+            if self.active_config:
+                tip += f" ({extract_tunnel_name(self.active_config)})"
+            self._tray.setToolTip(tip)
             self._tray_act_toggle.setText("Trennen")
+        self._update_window_title()
 
         # Auto-Login bei UpSnap
         QTimer.singleShot(500, lambda: self.sig.auto_login_signal.emit())
@@ -1820,6 +2165,8 @@ class VPNApp(QMainWindow):
         self.duration_label.hide()
         self._ping_timer.stop()
         self.ping_label.hide()
+        self._session_rx = 0
+        self._session_tx = 0
         self.vpn_ip_label.hide()
         self._watchdog_timer.stop()
         self._transfer_timer.stop()
@@ -1842,6 +2189,9 @@ class VPNApp(QMainWindow):
             self._tray.setToolTip(f"VPN Connect - Getrennt")
             self._tray_act_toggle.setText("Verbinden")
 
+        self._update_window_title()
+        self._remove_split_routes()
+
     # ── VPN Disconnect ─────────────────────────────────────────────────────
 
     def _on_disconnect(self):
@@ -1858,6 +2208,7 @@ class VPNApp(QMainWindow):
             if self.active_config:
                 disconnect_vpn(self.active_config)
                 _active_config = None
+            self._remove_split_routes()
             self.sig.disconnected_signal.emit()
 
         threading.Thread(target=work, daemon=True).start()
@@ -1916,6 +2267,7 @@ class VPNApp(QMainWindow):
         """Alle Einstellungen atomar in eine Datei speichern."""
         if getattr(self, '_loading', False):
             return
+        self._save_timer.stop()  # sofort, wenn explizit aufgerufen
         u = self.entry_user.text().strip()
         p = self.entry_pass.text().strip()
         enc_pw = _dpapi_protect(p)
@@ -1953,10 +2305,38 @@ class VPNApp(QMainWindow):
                 "rdp_passwords_enc": rdp_pw_enc,
                 "target_ip": self.entry_target_ip.text().strip(),
                 "target_port": port_val,
+                "rdp_resolution": self.cmb_rdp_res.currentData(),
+                "split_excludes": self._split_excludes,
+                "schedule_enable": self._schedule_enable,
+                "schedule_connect": self._schedule_connect,
+                "schedule_disconnect": self._schedule_disconnect,
+                "bw_threshold_mb": self._bw_threshold_mb,
+                "http_check_url": self._http_check_url,
             })
             self._write_settings_file(data)
         except OSError:
             pass
+
+    def _schedule_save(self):
+        if getattr(self, '_loading', False):
+            return
+        if hasattr(self, "chk_schedule"):
+            self._schedule_enable = self.chk_schedule.isChecked()
+        if hasattr(self, "entry_sched_connect"):
+            self._schedule_connect = self.entry_sched_connect.text().strip()
+        if hasattr(self, "entry_sched_disconnect"):
+            self._schedule_disconnect = self.entry_sched_disconnect.text().strip()
+        if hasattr(self, "entry_bw"):
+            try:
+                self._bw_threshold_mb = max(0, int(self.entry_bw.text().strip() or 0))
+            except ValueError:
+                self._bw_threshold_mb = 0
+        if hasattr(self, "entry_http"):
+            self._http_check_url = self.entry_http.text().strip()
+        if hasattr(self, "split_text"):
+            txt = self.split_text.toPlainText().strip()
+            self._split_excludes = [line.strip() for line in txt.splitlines() if line.strip()]
+        self._save_timer.start()
 
     def _load_credentials(self):
         self._loading = True
@@ -2015,6 +2395,28 @@ class VPNApp(QMainWindow):
             self.entry_target_port.setText(str(saved_port))
             self._apply_server_settings(save=False)
 
+            # RDP Auflösung
+            saved_res = d.get("rdp_resolution", None)
+            if saved_res:
+                for i in range(self.cmb_rdp_res.count()):
+                    if self.cmb_rdp_res.itemData(i) == tuple(saved_res):
+                        self.cmb_rdp_res.setCurrentIndex(i)
+                        break
+            self.btn_login.setEnabled(bool(TARGET_IP) and (self.upsnap is None))
+
+            self._split_excludes = d.get("split_excludes", [])
+            self._schedule_enable = d.get("schedule_enable", False)
+            self._schedule_connect = d.get("schedule_connect", "")
+            self._schedule_disconnect = d.get("schedule_disconnect", "")
+            self._bw_threshold_mb = int(d.get("bw_threshold_mb", 0) or 0)
+            self._http_check_url = d.get("http_check_url", "")
+            self.chk_schedule.setChecked(self._schedule_enable)
+            self.entry_sched_connect.setText(self._schedule_connect)
+            self.entry_sched_disconnect.setText(self._schedule_disconnect)
+            self.entry_bw.setText(str(self._bw_threshold_mb or ""))
+            self.entry_http.setText(self._http_check_url)
+            self.split_text.setPlainText("\n".join(self._split_excludes))
+
             # Auto-Connect beim Start
             _auto_connect = d.get("auto_connect", False) and bool(self.configs)
 
@@ -2072,8 +2474,59 @@ class VPNApp(QMainWindow):
 
                 self._notify("VPN verbunden", f"{name} – erkannt.")
                 QTimer.singleShot(500, lambda: self.sig.auto_login_signal.emit())
+                self._update_window_title(tn)
                 return True
         return False
+
+    def _on_bw_changed(self):
+        try:
+            v = int(self.entry_bw.text().strip() or 0)
+            self._bw_threshold_mb = max(0, v)
+        except ValueError:
+            self._bw_threshold_mb = 0
+        self._schedule_save()
+
+    def _on_http_changed(self):
+        self._http_check_url = self.entry_http.text().strip()
+        self._schedule_save()
+
+    def _on_split_changed(self):
+        txt = self.split_text.toPlainText().strip()
+        self._split_excludes = [line.strip() for line in txt.splitlines() if line.strip()]
+        self._schedule_save()
+
+    def _apply_split_routes(self):
+        self._remove_split_routes()
+        nets = _parse_networks(self._split_excludes)
+        if not nets:
+            return
+        gw = _default_gateway()
+        if not gw:
+            log("Split-Tunnel: Kein Default-Gateway gefunden.", "warning")
+            return
+        for net in nets:
+            if net.version != 4:
+                continue
+            try:
+                _run_silent(["route", "add", str(net.network_address),
+                             "mask", str(net.netmask), gw],
+                            capture_output=True, text=True, timeout=5)
+                self._routes_added.append(str(net))
+                log(f"Split-Tunnel Route gesetzt: {net} -> {gw}")
+            except Exception as e:
+                log(f"Split-Tunnel Route fehlgeschlagen ({net}): {e}", "warning")
+
+    def _remove_split_routes(self):
+        if not self._routes_added:
+            return
+        for net in self._routes_added:
+            try:
+                _run_silent(["route", "delete", net],
+                            capture_output=True, text=True, timeout=5)
+                log(f"Split-Tunnel Route entfernt: {net}")
+            except Exception:
+                pass
+        self._routes_added.clear()
 
     def _apply_server_settings(self, save: bool = True):
         """IP + Port aus den Feldern übernehmen und global setzen."""
@@ -2102,6 +2555,8 @@ class VPNApp(QMainWindow):
         if hasattr(self, 'btn_browser'):
             self.btn_browser.setEnabled(
                 self.vpn_connected and bool(TARGET_IP))
+        if hasattr(self, 'btn_login'):
+            self.btn_login.setEnabled(bool(TARGET_IP) and (self.upsnap is None))
         if save:
             self._save_settings()
 
@@ -2398,7 +2853,7 @@ class VPNApp(QMainWindow):
                 pass
 
     def _check_local_online(self, ip: str, status_lbl: QLabel):
-        """Fallback: lokales Ping, falls UpSnap 'offline' meldet."""
+        """Fallback: lokales Ping + TCP-Probe, falls UpSnap 'offline' meldet."""
         if not ip or ip in self._local_ping_tasks:
             return
         self._local_ping_tasks.add(ip)
@@ -2410,7 +2865,20 @@ class VPNApp(QMainWindow):
                     capture_output=True, text=True, timeout=2)
                 if r.returncode == 0:
                     self.sig.device_status_signal.emit(
-                        status_lbl, "Online (lokal)", C["green"])
+                        status_lbl, "Online (Ping)", C["green"])
+                    return
+                # TCP Fallback auf gängige Ports
+                for port in (3389, 22, 80):
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(1.0)
+                        s.connect((ip, port))
+                        s.close()
+                        self.sig.device_status_signal.emit(
+                            status_lbl, f"Online (tcp {port})", C["green"])
+                        return
+                    except Exception:
+                        continue
             except Exception:
                 pass
             finally:
@@ -2475,6 +2943,13 @@ class VPNApp(QMainWindow):
                 # Kein Credential-Prompt wenn cmdkey gesetzt
                 f.write(f"prompt for credentials:i:{'0' if (username and password) else '1'}\n")
                 f.write("authentication level:i:0\n")
+                res = self.cmb_rdp_res.currentData() if hasattr(self, "cmb_rdp_res") else None
+                if res:
+                    w, h = res
+                    f.write("screen mode id:i:2\n")
+                    f.write(f"desktopwidth:i:{w}\n")
+                    f.write(f"desktopheight:i:{h}\n")
+                    f.write("session bpp:i:32\n")
                 if username:
                     f.write(f"username:s:{username}\n")
             subprocess.Popen(["explorer.exe", rdp_path])
@@ -2594,6 +3069,44 @@ class VPNApp(QMainWindow):
                 s.close()
                 ms = int((time.time() - t0) * 1000)
                 self.sig.ping_result_signal.emit(f"{ms} ms")
+
+                # Optional: Handshake-Frische prüfen (WireGuard)
+                tn = extract_tunnel_name(self.active_config) if self.active_config else None
+                if tn:
+                    try:
+                        r = _run_silent(
+                            ["wg", "show", tn, "latest-handshakes"],
+                            capture_output=True, text=True, timeout=3)
+                        if r.returncode == 0 and r.stdout.strip():
+                            # Format: <pubkey>\t<unix_ts>
+                            ages = []
+                            now = int(time.time())
+                            for line in r.stdout.strip().splitlines():
+                                parts = line.split("\t")
+                                if len(parts) >= 2:
+                                    try:
+                                        ts = int(parts[1])
+                                        age = max(0, now - ts)
+                                        ages.append(age)
+                                    except ValueError:
+                                        pass
+                            if ages:
+                                min_age = min(ages)
+                                if min_age > 180:
+                                    log(f"WireGuard Handshake alt ({min_age}s)", "warning")
+                    except Exception:
+                        pass
+
+                # HTTP-Check
+                if self._http_check_url:
+                    try:
+                        req = request.Request(self._http_check_url, method="GET",
+                                              headers={"User-Agent": "VPN-Connect-HTTPCheck"})
+                        with request.urlopen(req, timeout=3) as resp:
+                            if resp.status != 200:
+                                log(f"HTTP-Check {self._http_check_url} -> {resp.status}", "warning")
+                    except Exception as e:
+                        log(f"HTTP-Check fehlgeschlagen: {e}", "warning")
             except Exception:
                 self.sig.ping_result_signal.emit("---")
         threading.Thread(target=work, daemon=True).start()
@@ -2637,7 +3150,15 @@ class VPNApp(QMainWindow):
                         total_rx += int(parts[1])
                         total_tx += int(parts[2])
                 text = f"↓ {self._format_bytes(total_rx)}  ↑ {self._format_bytes(total_tx)}"
+                self._session_rx = total_rx
+                self._session_tx = total_tx
                 self.sig.transfer_signal.emit(text)
+
+                if self._bw_threshold_mb > 0 and not self._bw_alerted:
+                    if (total_rx + total_tx) >= self._bw_threshold_mb * 1024 * 1024:
+                        self._bw_alerted = True
+                        self._notify("Bandbreite", f"Session > {self._bw_threshold_mb} MB")
+                        log(f"Datenvolumen überschritten: {self._bw_threshold_mb} MB", "warning")
             except Exception:
                 pass
         threading.Thread(target=work, daemon=True).start()
@@ -2658,6 +3179,41 @@ class VPNApp(QMainWindow):
         """Transfer-Stats Label aktualisieren (Main-Thread)."""
         self.transfer_label.setText(text)
         self.transfer_label.show()
+
+    # ── Zeitplan ────────────────────────────────────────────────────────────
+
+    def _schedule_tick(self):
+        if not self._schedule_enable:
+            return
+        now = datetime.datetime.now()
+        day = now.strftime("%Y-%m-%d")
+        if day != self._last_schedule_day:
+            self._last_schedule_day = day
+            self._did_sched_connect = False
+            self._did_sched_disconnect = False
+
+        def _parse(txt: str) -> Optional[datetime.time]:
+            try:
+                h, m = txt.strip().split(":")
+                return datetime.time(int(h), int(m))
+            except Exception:
+                return None
+
+        t_connect = _parse(self._schedule_connect)
+        t_disconnect = _parse(self._schedule_disconnect)
+        now_time = now.time().replace(second=0, microsecond=0)
+
+        if t_connect and not self._did_sched_connect and now_time >= t_connect:
+            if not self.vpn_connected:
+                log("Zeitplan: Auto-Connect", "info")
+                self._on_connect()
+            self._did_sched_connect = True
+
+        if t_disconnect and not self._did_sched_disconnect and now_time >= t_disconnect:
+            if self.vpn_connected:
+                log("Zeitplan: Auto-Disconnect", "info")
+                self._on_disconnect()
+            self._did_sched_disconnect = True
 
     # ── Auto-Login UpSnap ─────────────────────────────────────────────────
 
@@ -2711,6 +3267,37 @@ class VPNApp(QMainWindow):
             self._tray.showMessage(title, msg,
                                    QSystemTrayIcon.MessageIcon.Information, 3000)
 
+    def _on_alert(self, title: str, msg: str, level: str = "info"):
+        icon = QSystemTrayIcon.MessageIcon.Critical if level == "error" \
+               else QSystemTrayIcon.MessageIcon.Warning
+        if hasattr(self, '_tray') and self._tray and self._tray.isVisible():
+            self._tray.showMessage(title, msg, icon, 4000)
+        else:
+            # Fallback: Statuslabel einfärben kurz
+            self._set_status(title, C["red"] if level == "error" else C["yellow"])
+        self._append_log(f"[{title}] {msg}")
+
+    def _export_support(self):
+        """Erstellt ein Support-ZIP mit Log und anonymisierten Settings."""
+        try:
+            dest_dir = os.path.join(os.path.expanduser("~"), "Desktop")
+            os.makedirs(dest_dir, exist_ok=True)
+            zip_path = os.path.join(dest_dir, "VPN_Support.zip")
+
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+                if os.path.exists(log_file):
+                    z.write(log_file, arcname="vpn_debug.log")
+                # Settings anonymisieren
+                data = self._read_settings_file()
+                for k in ("pw_enc", "pw_b64", "pw", "rdp_passwords", "rdp_passwords_enc"):
+                    if k in data:
+                        data[k] = "***"
+                z.writestr("vpn_settings_sanitized.json", json.dumps(data, indent=2))
+            self._notify("Support-Paket", f"Erstellt: {zip_path}")
+            log(f"Support-Paket erstellt: {zip_path}")
+        except Exception as e:
+            log(f"Support-Paket fehlgeschlagen: {e}", "error")
+
     # ── VPN-IP ────────────────────────────────────────────────────────────
 
     def _fetch_vpn_ip(self, tunnel_name: str):
@@ -2736,6 +3323,14 @@ class VPNApp(QMainWindow):
             self.vpn_ip_label.show()
         else:
             self.vpn_ip_label.hide()
+
+    def _update_window_title(self, tunnel: Optional[str] = None):
+        base = f"VPN Connect  v{APP_VERSION}"
+        tn = tunnel or (extract_tunnel_name(self.active_config) if self.active_config else "")
+        if tn:
+            self.setWindowTitle(f"{base}  ·  {tn}")
+        else:
+            self.setWindowTitle(base)
 
     # ── Verbindungshistorie ───────────────────────────────────────────────
 
@@ -2956,6 +3551,7 @@ class VPNApp(QMainWindow):
         self._stop_auto_refresh()
         self._save_settings()
         _cleanup_temp_rdp()
+        self._remove_split_routes()
         _stop_dialog_dismisser()
         if self._tray:
             self._tray.hide()
@@ -2992,6 +3588,7 @@ class VPNApp(QMainWindow):
         self._stop_auto_refresh()
         self._save_settings()
         _cleanup_temp_rdp()
+        self._remove_split_routes()
         _stop_dialog_dismisser()
         if self._tray:
             self._tray.hide()
