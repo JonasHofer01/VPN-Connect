@@ -2023,8 +2023,57 @@ class VPNApp(QMainWindow):
         finally:
             self._loading = False
 
+        # Bereits laufenden Tunnel erkennen und UI synchronisieren
+        if self._detect_existing_tunnel():
+            _auto_connect = False
+
         if _auto_connect:
             QTimer.singleShot(800, self._on_connect)
+
+    def _detect_existing_tunnel(self) -> bool:
+        """Erkennt beim Start bereits laufende WireGuard-Tunnel und passt UI an."""
+        global _active_config
+        for idx, (name, path) in enumerate(self.configs):
+            tn = extract_tunnel_name(path)
+            if _service_state(tn) == "RUNNING":
+                log(f"Aktiven Tunnel erkannt: {tn}")
+                self.active_config = path
+                _active_config = path
+                self.vpn_connected = True
+                self.config_listbox.setCurrentRow(idx)
+                self.btn_connect.setEnabled(False)
+                self.btn_disconnect.setEnabled(True)
+                self.btn_cancel.hide()
+                self._set_status("Verbunden (erkannt)", C["green"])
+
+                self._reconnect_retries = 0
+                self._connect_time = time.time()
+                self._session_config_name = name
+                self._session_start_time = self._connect_time
+                self.duration_label.setText("00:00:00")
+                self.duration_label.show()
+                self._duration_timer.start()
+
+                self.ping_label.show()
+                self._ping_timer.start()
+                self._watchdog_timer.start()
+
+                self._transfer_timer.start()
+                self._transfer_tick()
+
+                # Browser-Button aktivieren falls Ziel gesetzt
+                self.btn_browser.setEnabled(bool(TARGET_IP))
+
+                threading.Thread(target=self._fetch_vpn_ip, args=(tn,), daemon=True).start()
+
+                if hasattr(self, '_tray') and self._tray:
+                    self._tray.setToolTip("VPN Connect - Verbunden")
+                    self._tray_act_toggle.setText("Trennen")
+
+                self._notify("VPN verbunden", f"{name} – erkannt.")
+                QTimer.singleShot(500, lambda: self.sig.auto_login_signal.emit())
+                return True
+        return False
 
     def _apply_server_settings(self, save: bool = True):
         """IP + Port aus den Feldern übernehmen und global setzen."""
