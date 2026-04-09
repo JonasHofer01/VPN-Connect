@@ -14,6 +14,8 @@ import hashlib
 from typing import Optional, List, Tuple
 from urllib import request, error
 
+import ctypes.wintypes as wt
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QListWidget, QFrame,
@@ -28,7 +30,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.9.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -87,6 +89,62 @@ def log(msg: str, level: str = "info") -> None:
     getattr(logging, level, logging.info)(msg)
     if _app:
         _app.sig.log_signal.emit(msg)
+
+
+# =============================================================================
+#  SECURITY / DPAPI
+# =============================================================================
+
+_settings_lock = threading.Lock()
+
+
+def _dpapi_protect(text: str) -> str:
+    """Schuetzt Klartext mit Windows DPAPI und gibt Base64 zurueck."""
+    if not text or sys.platform != "win32":
+        return ""
+    try:
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wt.DWORD),
+                        ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+        data = text.encode("utf-8")
+        blob_in = DATA_BLOB(len(data), ctypes.cast(
+            ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)))
+        blob_out = DATA_BLOB()
+
+        if ctypes.windll.crypt32.CryptProtectData(
+                ctypes.byref(blob_in), None, None, None, None, 0,
+                ctypes.byref(blob_out)):
+            buf = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+            ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+            return base64.b64encode(buf).decode("ascii")
+    except Exception:
+        pass
+    return ""
+
+
+def _dpapi_unprotect(token: str) -> str:
+    """Entschluesselt DPAPI-geschuetzten Base64-Blob. Liefert '' bei Fehler."""
+    if not token or sys.platform != "win32":
+        return ""
+    try:
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wt.DWORD),
+                        ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+        raw = base64.b64decode(token.encode("ascii"))
+        blob_in = DATA_BLOB(len(raw), ctypes.cast(
+            ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)))
+        blob_out = DATA_BLOB()
+        if ctypes.windll.crypt32.CryptUnprotectData(
+                ctypes.byref(blob_in), None, None, None, None, 0,
+                ctypes.byref(blob_out)):
+            buf = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+            ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+            return buf.decode("utf-8")
+    except Exception:
+        pass
+    return ""
 
 
 # =============================================================================
@@ -232,6 +290,7 @@ def _wait_service_gone(tn: str, timeout: int = 15) -> bool:
 # ── Dialog-Auto-Schließer ────────────────────────────────────────────────
 
 _dismiss_running = False
+_dismiss_stop = threading.Event()
 
 
 def _start_dialog_dismisser():
@@ -239,6 +298,7 @@ def _start_dialog_dismisser():
     if _dismiss_running:
         return
     _dismiss_running = True
+    _dismiss_stop.clear()
     threading.Thread(target=_dialog_dismisser_loop, daemon=True).start()
 
 
@@ -297,7 +357,7 @@ def _dialog_dismisser_loop():
         user32.PostMessageW(hwnd, WM_COMMAND, IDOK, 0)
         user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
 
-    while True:
+    while not _dismiss_stop.is_set():
         try:
             found: list[int] = []
 
@@ -332,6 +392,13 @@ def _dialog_dismisser_loop():
         except Exception:
             pass
         time.sleep(0.2)
+
+    _dismiss_stop.clear()
+    _dismiss_running = False
+
+
+def _stop_dialog_dismisser():
+    _dismiss_stop.set()
 
 
 # ── Cancel-Mechanismus ───────────────────────────────────────────────────
@@ -585,16 +652,34 @@ def check_for_update() -> Optional[dict]:
             log(f"Kein Update (lokal={APP_VERSION}, remote={remote_tag}).")
             return None
 
+        exe_asset = None
+        sha_asset = None
         for asset in data.get("assets", []):
             if asset["name"].lower().endswith(".exe"):
-                log(f"Update verfügbar: {remote_tag} (aktuell: {APP_VERSION})")
-                return {
-                    "tag": remote_tag,
-                    "url": asset["browser_download_url"],
-                    "size": asset.get("size", 0),
-                    "name": asset["name"],
-                }
-        log("Release ohne .exe-Asset.", "warning")
+                exe_asset = asset
+            if any(asset["name"].lower().endswith(suf) for suf in
+                   (".sha256", ".sha256.txt", ".sha256sum")):
+                sha_asset = asset
+
+        if exe_asset:
+            sha_hex = None
+            if sha_asset:
+                try:
+                    sha_hex = _fetch_sha256(sha_asset["browser_download_url"])
+                    log("SHA256 aus Release-Asset geladen.")
+                except Exception as e:
+                    log(f"SHA256 konnte nicht geladen werden: {e}", "warning")
+
+            log(f"Update verfügbar: {remote_tag} (aktuell: {APP_VERSION})")
+            return {
+                "tag": remote_tag,
+                "url": exe_asset["browser_download_url"],
+                "size": exe_asset.get("size", 0),
+                "name": exe_asset["name"],
+                "sha": sha_hex,
+            }
+        else:
+            log("Release ohne .exe-Asset.", "warning")
     except error.HTTPError as e:
         if e.code == 404:
             log("Kein Release auf GitHub vorhanden – Update-Check uebersprungen.")
@@ -605,12 +690,25 @@ def check_for_update() -> Optional[dict]:
     return None
 
 
-def download_update(url: str, dest: str, progress_cb=None) -> bool:
+def _fetch_sha256(url: str) -> str:
+    """Liest ein SHA256-File und gibt den Hex-String zurück."""
+    req = request.Request(url, headers={"User-Agent": "VPN-Connect-Updater"})
+    with request.urlopen(req, timeout=10) as resp:
+        txt = resp.read().decode("utf-8", errors="ignore")
+    first = txt.strip().split()[0]
+    if len(first) >= 64 and all(c in "0123456789abcdefABCDEF" for c in first[:64]):
+        return first[:64].lower()
+    raise ValueError("Kein gültiger SHA256-Hash gefunden.")
+
+
+def download_update(url: str, dest: str, progress_cb=None,
+                    expected_size: int = 0, expected_sha: Optional[str] = None) -> bool:
     try:
         req = request.Request(url, headers={"User-Agent": "VPN-Connect-Updater"})
         with request.urlopen(req, timeout=60) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             done = 0
+            hasher = hashlib.sha256()
             with open(dest, "wb") as f:
                 while True:
                     chunk = resp.read(65536)
@@ -618,9 +716,21 @@ def download_update(url: str, dest: str, progress_cb=None) -> bool:
                         break
                     f.write(chunk)
                     done += len(chunk)
+                    hasher.update(chunk)
                     if progress_cb:
                         progress_cb(done, total)
-        log(f"Download abgeschlossen: {dest}")
+        if expected_size and done != expected_size:
+            log(f"Download-Größe stimmt nicht ({done} != {expected_size})", "error")
+            os.remove(dest)
+            return False
+
+        file_sha = hasher.hexdigest()
+        if expected_sha and file_sha.lower() != expected_sha.lower():
+            log(f"SHA256 stimmt nicht überein (erwartet {expected_sha}, erhalten {file_sha})", "error")
+            os.remove(dest)
+            return False
+
+        log(f"Download abgeschlossen: {dest} (SHA256 {file_sha})")
         return True
     except Exception as e:
         log(f"Download fehlgeschlagen: {e}", "error")
@@ -635,32 +745,63 @@ def apply_update(new_exe: str) -> None:
     if not getattr(sys, 'frozen', False):
         log("Update nur als EXE möglich.", "warning")
         return
+    if not os.path.exists(new_exe):
+        log(f"Update-Datei fehlt: {new_exe}", "error")
+        return
 
     current = sys.executable
     backup = current + ".old"
+    pid = os.getpid()
 
+    # Hilfsskript schreiben, das nach Prozessende ersetzt
+    temp_dir = os.environ.get("TEMP", _base_dir)
+    updater_ps1 = os.path.join(temp_dir, "_vpn_updater.ps1")
+
+    script = """$ErrorActionPreference = "Stop"
+$current = "{current}"
+$new = "{new}"
+$backup = "{backup}"
+$pid = {pid}
+
+try {{
+    Wait-Process -Id $pid -Timeout 30 -ErrorAction SilentlyContinue
+}} catch {{ }}
+
+function Wait-ForUnlock($path, $retries) {{
+    for ($i=0; $i -lt $retries; $i++) {{
+        try {{
+            $fs = [System.IO.File]::Open($path, 'Open', 'ReadWrite', 'None')
+            $fs.Close()
+            return $true
+        }} catch {{
+            Start-Sleep -Milliseconds 500
+        }}
+    }}
+    return $false
+}}
+
+if (Test-Path $backup) {{ Remove-Item $backup -Force -ErrorAction SilentlyContinue }}
+
+if (-not (Wait-ForUnlock $current 40)) {{ Write-Host "Datei gesperrt"; exit 1 }}
+
+Move-Item -Force $current $backup
+Move-Item -Force $new $current
+
+Start-Process $current "--cleanup"
+Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+""".format(current=current, new=new_exe, backup=backup, pid=pid)
     try:
-        if os.path.exists(backup):
-            os.remove(backup)
-
-        os.rename(current, backup)
-        log(f"Alte EXE umbenannt → {os.path.basename(backup)}")
-
-        os.rename(new_exe, current)
-        log("Neue EXE installiert.")
-
-        subprocess.Popen([current, "--cleanup"])
-        log("Neustart...")
+        with open(updater_ps1, "w", encoding="utf-8") as f:
+            f.write(script)
+        log(f"Updater-Skript geschrieben: {updater_ps1}")
+        # Start PowerShell Helper im Hintergrund
+        subprocess.Popen(["powershell", "-ExecutionPolicy", "Bypass",
+                          "-File", updater_ps1],
+                         creationflags=CREATE_NO_WINDOW)
+        log("Updater gestartet, Anwendung wird beendet...")
         sys.exit(0)
-
     except Exception as e:
         log(f"Update-Installation fehlgeschlagen: {e}", "error")
-        try:
-            if not os.path.exists(current) and os.path.exists(backup):
-                os.rename(backup, current)
-                log("Rollback erfolgreich.")
-        except Exception:
-            pass
 
 
 def _cleanup_old_exe():
@@ -997,6 +1138,9 @@ class VPNApp(QMainWindow):
         self._favorites: List[str] = []        # device IDs
         self._rdp_users: dict = {}             # device_name -> username
         self._rdp_passwords: dict = {}         # device_name -> password (base64)
+        self._last_target_ip: str = TARGET_IP
+        self._last_target_port: int = TARGET_PORT
+        self._local_ping_tasks: set = set()
         self._devices_hash: str = ""           # Hash der Geräteliste (Smart-Refresh)
         self._active_ops: set = set()          # Device-IDs mit laufenden Operationen
         self._refresh_in_progress: bool = False  # verhindert parallele API-Aufrufe
@@ -1533,6 +1677,8 @@ class VPNApp(QMainWindow):
 
         def work():
             dest = os.path.join(_base_dir, "VPN_Connect_new.exe")
+            expected_sha = info.get("sha")
+            expected_size = info.get("size", 0)
 
             def progress(done, total):
                 if total > 0:
@@ -1540,7 +1686,14 @@ class VPNApp(QMainWindow):
                     self.sig.update_progress_signal.emit(
                         f"⬆ {pct}%  ({done // 1024 // 1024}/{total // 1024 // 1024} MB)")
 
-            ok = download_update(info["url"], dest, progress)
+            if expected_sha:
+                log(f"Erwartete SHA256: {expected_sha}")
+            else:
+                log("Keine SHA256 im Release gefunden – Download ohne Hash-Check.", "warning")
+
+            ok = download_update(info["url"], dest, progress,
+                                 expected_size=expected_size,
+                                 expected_sha=expected_sha)
             if ok:
                 self.sig.apply_update_signal.emit(dest)
             else:
@@ -1743,9 +1896,10 @@ class VPNApp(QMainWindow):
     def _read_settings_file(self) -> dict:
         """Settings-Datei lesen. Gibt {} zurück bei Fehler oder fehlender Datei."""
         try:
-            if os.path.exists(self._CRED_FILE):
-                with open(self._CRED_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
+            with _settings_lock:
+                if os.path.exists(self._CRED_FILE):
+                    with open(self._CRED_FILE, "r", encoding="utf-8") as f:
+                        return json.load(f)
         except Exception:
             pass
         return {}
@@ -1753,9 +1907,10 @@ class VPNApp(QMainWindow):
     def _write_settings_file(self, data: dict) -> None:
         """Settings-Datei atomar schreiben."""
         tmp = self._CRED_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, self._CRED_FILE)
+        with _settings_lock:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, self._CRED_FILE)
 
     def _save_settings(self):
         """Alle Einstellungen atomar in eine Datei speichern."""
@@ -1763,20 +1918,41 @@ class VPNApp(QMainWindow):
             return
         u = self.entry_user.text().strip()
         p = self.entry_pass.text().strip()
+        enc_pw = _dpapi_protect(p)
+        # RDP-Passwoerter: aus Base64 decodieren, dann DPAPI sichern
+        rdp_pw_enc: dict = {}
+        for host, pw_b64 in self._rdp_passwords.items():
+            try:
+                pw_plain = base64.b64decode(pw_b64.encode("ascii")).decode("utf-8")
+            except Exception:
+                pw_plain = ""
+            if pw_plain:
+                enc = _dpapi_protect(pw_plain)
+                if enc:
+                    rdp_pw_enc[host] = enc
+
+        try:
+            port_txt = self.entry_target_port.text().strip()
+            port_val = int(port_txt) if port_txt else TARGET_PORT
+        except ValueError:
+            port_val = TARGET_PORT
+
         try:
             data = self._read_settings_file()
             data.update({
                 "v": 2,
                 "user": u,
+                "pw_enc": enc_pw,
                 "pw_b64": base64.b64encode(p.encode("utf-8")).decode("ascii") if p else "",
                 "last_config": self.config_listbox.currentRow(),
                 "auto_reconnect": self.chk_auto_reconnect.isChecked(),
                 "auto_connect": self.chk_auto_connect.isChecked(),
                 "favorites": self._favorites,
                 "rdp_users": self._rdp_users,
-                "rdp_passwords": self._rdp_passwords,
+                "rdp_passwords": self._rdp_passwords,          # Fallback (alt)
+                "rdp_passwords_enc": rdp_pw_enc,
                 "target_ip": self.entry_target_ip.text().strip(),
-                "target_port": int(self.entry_target_port.text().strip() or TARGET_PORT),
+                "target_port": port_val,
             })
             self._write_settings_file(data)
         except OSError:
@@ -1792,13 +1968,19 @@ class VPNApp(QMainWindow):
 
             self.entry_user.setText(d.get("user", ""))
 
-            # Passwort: v2=base64, v1=plaintext
-            if d.get("v", 1) >= 2 and d.get("pw_b64"):
-                pw = base64.b64decode(d["pw_b64"].encode("ascii")).decode("utf-8")
-                self.entry_pass.setText(pw)
-            elif d.get("pw"):
-                self.entry_pass.setText(d["pw"])
-                QTimer.singleShot(500, self._save_settings)
+            # Passwort: bevorzugt DPAPI, sonst Base64, sonst Plaintext
+            pw_plain = ""
+            if d.get("pw_enc"):
+                pw_plain = _dpapi_unprotect(d.get("pw_enc", ""))
+            if not pw_plain and d.get("pw_b64"):
+                try:
+                    pw_plain = base64.b64decode(d["pw_b64"].encode("ascii")).decode("utf-8")
+                except Exception:
+                    pw_plain = ""
+            if not pw_plain and d.get("pw"):
+                pw_plain = d["pw"]
+                QTimer.singleShot(500, self._save_settings)  # Migriert auf DPAPI
+            self.entry_pass.setText(pw_plain)
 
             # Letzte Config
             idx = d.get("last_config", 0)
@@ -1814,7 +1996,16 @@ class VPNApp(QMainWindow):
             # Favoriten & RDP-User & RDP-Passwörter
             self._favorites = d.get("favorites", [])
             self._rdp_users = d.get("rdp_users", {})
-            self._rdp_passwords = d.get("rdp_passwords", {})
+            self._rdp_passwords = {}
+            rdp_enc = d.get("rdp_passwords_enc", {})
+            if rdp_enc:
+                for host, enc in rdp_enc.items():
+                    pw_plain = _dpapi_unprotect(enc)
+                    if pw_plain:
+                        self._rdp_passwords[host] = base64.b64encode(
+                            pw_plain.encode("utf-8")).decode("ascii")
+            else:
+                self._rdp_passwords = d.get("rdp_passwords", {})
 
             # Server IP + Port laden und anwenden
             saved_ip = d.get("target_ip", "")
@@ -1840,12 +2031,24 @@ class VPNApp(QMainWindow):
         global TARGET_IP, TARGET_PORT
         ip = self.entry_target_ip.text().strip()
         port_txt = self.entry_target_port.text().strip()
+        if not ip:
+            QMessageBox.warning(self, "Server", "IP / Hostname darf nicht leer sein.")
+            self.entry_target_ip.setText(self._last_target_ip)
+            return
         try:
             port = int(port_txt) if port_txt else TARGET_PORT
         except ValueError:
-            port = TARGET_PORT
+            QMessageBox.warning(self, "Server", "Port ist ungültig.")
+            self.entry_target_port.setText(str(self._last_target_port))
+            return
+        if not (1 <= port <= 65535):
+            QMessageBox.warning(self, "Server", "Port muss zwischen 1 und 65535 liegen.")
+            self.entry_target_port.setText(str(self._last_target_port))
+            return
         TARGET_IP = ip
         TARGET_PORT = port
+        self._last_target_ip = ip
+        self._last_target_port = port
         # Browser-Button nur aktiv wenn IP gesetzt und verbunden
         if hasattr(self, 'btn_browser'):
             self.btn_browser.setEnabled(
@@ -1895,6 +2098,11 @@ class VPNApp(QMainWindow):
         # Wenn bereits angemeldet → Abmelden
         if self.upsnap is not None:
             self._on_logout()
+            return
+
+        if not TARGET_IP:
+            QMessageBox.warning(self, "UpSnap",
+                                "Bitte IP/Hostname unter 'Server / Ziel' angeben.")
             return
 
         u = self.entry_user.text().strip()
@@ -2102,6 +2310,9 @@ class VPNApp(QMainWindow):
 
                 btn_refs += [b1, b2]
 
+            if not online and ip and ip != "?":
+                self._check_local_online(ip, status_lbl)
+
             self.device_frame.addWidget(row)
             self._device_widgets.append(row)
 
@@ -2136,6 +2347,27 @@ class VPNApp(QMainWindow):
                 b.setEnabled(enabled)
             except RuntimeError:
                 pass
+
+    def _check_local_online(self, ip: str, status_lbl: QLabel):
+        """Fallback: lokales Ping, falls UpSnap 'offline' meldet."""
+        if not ip or ip in self._local_ping_tasks:
+            return
+        self._local_ping_tasks.add(ip)
+
+        def work():
+            try:
+                r = _run_silent(
+                    ["ping", "-n", "1", "-w", "800", ip],
+                    capture_output=True, text=True, timeout=2)
+                if r.returncode == 0:
+                    self.sig.device_status_signal.emit(
+                        status_lbl, "Online (lokal)", C["green"])
+            except Exception:
+                pass
+            finally:
+                self._local_ping_tasks.discard(ip)
+
+        threading.Thread(target=work, daemon=True).start()
 
     # ── Device-Actions ─────────────────────────────────────────────────────
 
@@ -2174,6 +2406,7 @@ class VPNApp(QMainWindow):
             self._set_btns(btn_refs, False)
         if status_lbl:
             self._set_device_status(status_lbl, "RDP starten...", C["cyan"])
+        creds_added = False
         try:
             # Credentials via cmdkey hinterlegen (ermöglicht automatisches Login)
             if username and password:
@@ -2182,6 +2415,7 @@ class VPNApp(QMainWindow):
                         ["cmdkey", f"/add:{ip}", f"/user:{username}", f"/pass:{password}"],
                         capture_output=True, timeout=10)
                     log(f"RDP: Credentials für {ip} hinterlegt.")
+                    creds_added = True
                 except Exception as e:
                     log(f"cmdkey Fehler: {e}", "warning")
 
@@ -2219,6 +2453,12 @@ class VPNApp(QMainWindow):
             threading.Thread(target=_del, daemon=True).start()
         except Exception as e:
             log(f"RDP Fehler: {e}", "error")
+            if creds_added:
+                try:
+                    _run_silent(["cmdkey", f"/delete:{ip}"],
+                                capture_output=True, timeout=10)
+                except Exception:
+                    pass
         finally:
             if btn_refs:
                 QTimer.singleShot(3000, lambda: self.sig.btns_state_signal.emit(btn_refs, True))
@@ -2667,6 +2907,7 @@ class VPNApp(QMainWindow):
         self._stop_auto_refresh()
         self._save_settings()
         _cleanup_temp_rdp()
+        _stop_dialog_dismisser()
         if self._tray:
             self._tray.hide()
         QApplication.quit()
@@ -2702,6 +2943,7 @@ class VPNApp(QMainWindow):
         self._stop_auto_refresh()
         self._save_settings()
         _cleanup_temp_rdp()
+        _stop_dialog_dismisser()
         if self._tray:
             self._tray.hide()
         event.accept()
