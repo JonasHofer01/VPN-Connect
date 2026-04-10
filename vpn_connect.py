@@ -36,7 +36,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "2.0.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -357,6 +357,7 @@ def _start_dialog_dismisser():
 
 
 def _dialog_dismisser_loop():
+    global _dismiss_running
     import ctypes.wintypes as wt
 
     user32   = ctypes.windll.user32
@@ -411,44 +412,45 @@ def _dialog_dismisser_loop():
         user32.PostMessageW(hwnd, WM_COMMAND, IDOK, 0)
         user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
 
-    while not _dismiss_stop.is_set():
-        try:
-            found: list[int] = []
+    try:
+        while not _dismiss_stop.is_set():
+            try:
+                found: list[int] = []
 
-            @WNDENUMPROC
-            def _cb(hwnd, _):
-                if not user32.IsWindowVisible(hwnd):
+                @WNDENUMPROC
+                def _cb(hwnd, _):
+                    if not user32.IsWindowVisible(hwnd):
+                        return True
+                    title_buf = ctypes.create_unicode_buffer(256)
+                    user32.GetWindowTextW(hwnd, title_buf, 256)
+                    title = title_buf.value
+
+                    cls_buf = ctypes.create_unicode_buffer(64)
+                    user32.GetClassNameW(hwnd, cls_buf, 64)
+                    cls = cls_buf.value
+
+                    if cls == "#32770" and _get_proc_name(hwnd) == "wireguard.exe":
+                        found.append(hwnd)
+                        return True
+                    if title in BAD_TITLES and cls in ("#32770", "TaskManagerWindow"):
+                        found.append(hwnd)
                     return True
-                title_buf = ctypes.create_unicode_buffer(256)
-                user32.GetWindowTextW(hwnd, title_buf, 256)
-                title = title_buf.value
 
-                cls_buf = ctypes.create_unicode_buffer(64)
-                user32.GetClassNameW(hwnd, cls_buf, 64)
-                cls = cls_buf.value
+                user32.EnumWindows(_cb, 0)
 
-                if cls == "#32770" and _get_proc_name(hwnd) == "wireguard.exe":
-                    found.append(hwnd)
-                    return True
-                if title in BAD_TITLES and cls in ("#32770", "TaskManagerWindow"):
-                    found.append(hwnd)
-                return True
+                for hwnd in found:
+                    title_buf = ctypes.create_unicode_buffer(256)
+                    user32.GetWindowTextW(hwnd, title_buf, 256)
+                    log(f"WireGuard-Dialog geschlossen: '{title_buf.value}'")
+                    _close_hwnd(hwnd)
+                    time.sleep(0.3)
 
-            user32.EnumWindows(_cb, 0)
-
-            for hwnd in found:
-                title_buf = ctypes.create_unicode_buffer(256)
-                user32.GetWindowTextW(hwnd, title_buf, 256)
-                log(f"WireGuard-Dialog geschlossen: '{title_buf.value}'")
-                _close_hwnd(hwnd)
-                time.sleep(0.3)
-
-        except Exception:
-            pass
-        time.sleep(0.2)
-
-    _dismiss_stop.clear()
-    _dismiss_running = False
+            except Exception:
+                pass
+            time.sleep(0.2)
+    finally:
+        _dismiss_stop.clear()
+        _dismiss_running = False
 
 
 def _stop_dialog_dismisser():
@@ -1301,9 +1303,6 @@ class VPNApp(QMainWindow):
         self._transfer_timer = QTimer(self)
         self._transfer_timer.setInterval(5_000)
         self._transfer_timer.timeout.connect(self._transfer_tick)
-        self._schedule_timer = QTimer(self)
-        self._schedule_timer.setInterval(30_000)
-        self._schedule_timer.timeout.connect(self._schedule_tick)
 
         self._loading = True          # blockiert _save_settings während gesamter Initialisierung
         self._build_ui()
@@ -1348,7 +1347,6 @@ class VPNApp(QMainWindow):
         self.sig.transfer_signal.connect(self._update_transfer_label)
         self.sig.status_signal.connect(lambda t, c: self._update_window_title())
         self.sig.alert_signal.connect(self._on_alert)
-        self._schedule_timer.start()
 
     # ── Layout ─────────────────────────────────────────────────────────────
 
@@ -1366,74 +1364,22 @@ class VPNApp(QMainWindow):
         scroll.setWidget(outer)
         main_layout = QVBoxLayout(outer)
         main_layout.setContentsMargins(12, 12, 12, 12)
-        main_layout.setSpacing(8)
+        main_layout.setSpacing(4)
 
         # ── Header ──
         hdr = QHBoxLayout()
-        hdr.setContentsMargins(0, 0, 0, 10)
+        hdr.setContentsMargins(0, 0, 0, 4)
 
         title = QLabel("VPN Connect")
-        title.setFont(QFont("Segoe UI Variable Display", 22, QFont.Weight.DemiBold))
+        title.setFont(QFont("Segoe UI Variable Display", 18, QFont.Weight.DemiBold))
         title.setStyleSheet(f"color: {C['fg']}; letter-spacing: -0.5px;")
         hdr.addWidget(title)
 
         subtitle = QLabel("WireGuard · UpSnap · RDP")
-        subtitle.setStyleSheet(f"color: {C['dim']}; font-size: 10pt; letter-spacing: 0.2px;")
+        subtitle.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; letter-spacing: 0.2px;")
         hdr.addWidget(subtitle)
-        hdr.setSpacing(12)
-
-        # Update-Button (initial versteckt)
-        self.btn_update = _make_btn("↑  Update verfügbar", C["green"], "#000000", "#8fdf81")
-        self.btn_update.clicked.connect(self._on_update)
-        self.btn_update.hide()
-        hdr.addWidget(self.btn_update)
-
+        hdr.setSpacing(10)
         hdr.addStretch()
-
-        # Duration Label
-        self.duration_label = QLabel("")
-        self.duration_label.setFont(QFont("Segoe UI Variable Text", 9))
-        self.duration_label.setStyleSheet(f"color: {C['dim']};")
-        self.duration_label.hide()
-        hdr.addWidget(self.duration_label)
-        hdr.addSpacing(12)
-
-        # Ping Label
-        self.ping_label = QLabel("")
-        self.ping_label.setFont(QFont("Cascadia Code", 9))
-        self.ping_label.setStyleSheet(f"color: {C['dim']};")
-        self.ping_label.hide()
-        hdr.addWidget(self.ping_label)
-        hdr.addSpacing(14)
-
-        # VPN-IP Label
-        self.vpn_ip_label = QLabel("")
-        self.vpn_ip_label.setFont(QFont("Cascadia Code", 9))
-        self.vpn_ip_label.setStyleSheet(f"color: {C['accent']};")
-        self.vpn_ip_label.setToolTip("VPN-Tunnel IP-Adresse")
-        self.vpn_ip_label.hide()
-        hdr.addWidget(self.vpn_ip_label)
-        hdr.addSpacing(14)
-
-        # Transfer-Stats Label
-        self.transfer_label = QLabel("")
-        self.transfer_label.setFont(QFont("Cascadia Code", 9))
-        self.transfer_label.setStyleSheet(f"color: {C['dim']};")
-        self.transfer_label.setToolTip("VPN Datentransfer")
-        self.transfer_label.hide()
-        hdr.addWidget(self.transfer_label)
-        hdr.addSpacing(14)
-
-        # Status-Badge
-        status_box = QHBoxLayout()
-        status_box.setSpacing(7)
-        self.status_dot = DotWidget(C["red"], size=10)
-        status_box.addWidget(self.status_dot)
-        self.status_label = QLabel("Getrennt")
-        self.status_label.setFont(QFont("Segoe UI Variable Text", 10, QFont.Weight.Medium))
-        self.status_label.setStyleSheet(f"color: {C['red']};")
-        status_box.addWidget(self.status_label)
-        hdr.addLayout(status_box)
 
         main_layout.addLayout(hdr)
 
@@ -1467,11 +1413,81 @@ class VPNApp(QMainWindow):
         # Haupt-Tab
         main_tab = QWidget()
         main_tab_layout = QVBoxLayout(main_tab)
-        main_tab_layout.setContentsMargins(8, 10, 8, 10)
-        main_tab_layout.setSpacing(8)
+        main_tab_layout.setContentsMargins(10, 8, 10, 8)
+        main_tab_layout.setSpacing(6)
 
-        # ── WireGuard Sektion ──
-        main_tab_layout.addWidget(self._section_label("WireGuard"))
+        # ── Verbindungs-Status-Bar ──
+        status_bar = QFrame()
+        status_bar.setStyleSheet(f"""
+            QFrame {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {C['card']}, stop:1 {C['surface']});
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        status_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        status_bar.setFixedHeight(40)
+        sb_layout = QHBoxLayout(status_bar)
+        sb_layout.setContentsMargins(14, 0, 14, 0)
+        sb_layout.setSpacing(10)
+
+        # Status-Dot + Label
+        self.status_dot = DotWidget(C["red"], size=10)
+        sb_layout.addWidget(self.status_dot)
+        self.status_label = QLabel("Getrennt")
+        self.status_label.setFont(QFont("Segoe UI Variable Text", 10, QFont.Weight.DemiBold))
+        self.status_label.setStyleSheet(f"color: {C['red']};")
+        sb_layout.addWidget(self.status_label)
+
+        # Separator
+        sep_v1 = QFrame()
+        sep_v1.setFixedWidth(1)
+        sep_v1.setFixedHeight(20)
+        sep_v1.setStyleSheet(f"background: {C['border_l']}; border: none;")
+        sb_layout.addWidget(sep_v1)
+
+        # Duration
+        self.duration_label = QLabel("")
+        self.duration_label.setFont(QFont("Cascadia Code", 9))
+        self.duration_label.setStyleSheet(f"color: {C['dim']};")
+        self.duration_label.hide()
+        sb_layout.addWidget(self.duration_label)
+
+        # Ping
+        self.ping_label = QLabel("")
+        self.ping_label.setFont(QFont("Cascadia Code", 9))
+        self.ping_label.setStyleSheet(f"color: {C['dim']};")
+        self.ping_label.hide()
+        sb_layout.addWidget(self.ping_label)
+
+        # VPN-IP
+        self.vpn_ip_label = QLabel("")
+        self.vpn_ip_label.setFont(QFont("Cascadia Code", 9))
+        self.vpn_ip_label.setStyleSheet(f"color: {C['accent']};")
+        self.vpn_ip_label.setToolTip("VPN-Tunnel IP-Adresse")
+        self.vpn_ip_label.hide()
+        sb_layout.addWidget(self.vpn_ip_label)
+
+        # Transfer
+        self.transfer_label = QLabel("")
+        self.transfer_label.setFont(QFont("Cascadia Code", 9))
+        self.transfer_label.setStyleSheet(f"color: {C['dim']};")
+        self.transfer_label.setToolTip("VPN Datentransfer")
+        self.transfer_label.hide()
+        sb_layout.addWidget(self.transfer_label)
+
+        sb_layout.addStretch()
+
+        # Update-Button (initial versteckt) – rechts in der Statusbar
+        self.btn_update = _make_btn("\u2b06 Update", C["green"], "#000000", "#8fdf81")
+        self.btn_update.clicked.connect(self._on_update)
+        self.btn_update.hide()
+        sb_layout.addWidget(self.btn_update)
+
+        main_tab_layout.addWidget(status_bar)
+
+        # ── WireGuard ──
         wg_card = QFrame()
         wg_card.setStyleSheet(f"""
             QFrame {{
@@ -1480,38 +1496,46 @@ class VPNApp(QMainWindow):
                 border-radius: 8px;
             }}
         """)
-        wg_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        wg_card.setMaximumHeight(100)
+        wg_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         wg_layout = QVBoxLayout(wg_card)
-        wg_layout.setContentsMargins(10, 8, 10, 8)
+        wg_layout.setContentsMargins(12, 8, 12, 8)
         wg_layout.setSpacing(6)
 
+        # Titel-Zeile mit Label
+        wg_hdr = QHBoxLayout()
+        wg_hdr.setSpacing(6)
+        wg_title = QLabel("WireGuard")
+        wg_title.setFont(QFont("Segoe UI Variable Text", 9, QFont.Weight.DemiBold))
+        wg_title.setStyleSheet(f"color: {C['dim']}; letter-spacing: 0.3px;")
+        wg_hdr.addWidget(wg_title)
+        wg_hdr.addStretch()
+        wg_layout.addLayout(wg_hdr)
+
         self.config_listbox = QListWidget()
-        self.config_listbox.setMaximumHeight(50)
         self.config_listbox.itemDoubleClicked.connect(
             lambda: self._on_connect() if not self.vpn_connected else None)
         self.config_listbox.currentRowChanged.connect(lambda: self._schedule_save())
         wg_layout.addWidget(self.config_listbox)
 
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
+        btn_row.setSpacing(6)
         btn_row.setContentsMargins(0, 2, 0, 0)
 
-        self.btn_connect = _make_btn("  Verbinden", C["accent"], "#000000", C["accent_h"])
+        self.btn_connect = _make_btn("Verbinden", C["accent"], "#000000", C["accent_h"])
         self.btn_connect.clicked.connect(self._on_connect)
         btn_row.addWidget(self.btn_connect)
 
-        self.btn_disconnect = _make_btn("  Trennen", C["red"], "#ffffff", "#FF8C8C")
+        self.btn_disconnect = _make_btn("Trennen", C["red"], "#ffffff", "#FF8C8C")
         self.btn_disconnect.clicked.connect(self._on_disconnect)
         self.btn_disconnect.setEnabled(False)
         btn_row.addWidget(self.btn_disconnect)
 
-        self.btn_cancel = _make_btn("  Abbrechen", C["surface"], C["fg"], C["surface_h"])
+        self.btn_cancel = _make_btn("Abbrechen", C["surface"], C["fg"], C["surface_h"])
         self.btn_cancel.clicked.connect(self._on_cancel)
         self.btn_cancel.hide()
         btn_row.addWidget(self.btn_cancel)
 
-        self.btn_browser = _make_btn("  Im Browser öffnen", C["surface"], C["fg"], C["surface_h"])
+        self.btn_browser = _make_btn("Browser", C["surface"], C["fg"], C["surface_h"])
         self.btn_browser.clicked.connect(self._on_open_browser)
         self.btn_browser.setEnabled(False)
         btn_row.addWidget(self.btn_browser)
@@ -1519,27 +1543,9 @@ class VPNApp(QMainWindow):
         btn_row.addStretch()
         wg_layout.addLayout(btn_row)
 
-        chk_qss = f"""
-            QCheckBox {{ color: {C['dim']}; font-size: 9pt; spacing: 8px; }}
-            QCheckBox::indicator {{
-                width: 16px; height: 16px; border-radius: 3px;
-                border: 1px solid {C['border_l']}; background: transparent;
-            }}
-            QCheckBox::indicator:hover {{
-                border: 1px solid {C['accent']}; background: rgba(96,205,255,0.08);
-            }}
-            QCheckBox::indicator:checked {{
-                background: {C['accent']}; border: 1px solid {C['accent']};
-            }}
-        """
-
-        # (Checkboxen jetzt im Einstellungen-Tab)
-
         main_tab_layout.addWidget(wg_card)
 
         # ── UpSnap / Wake on LAN ──
-        main_tab_layout.addWidget(self._section_label("UpSnap  ·  Wake on LAN"))
-
         snap_card = QFrame()
         snap_card.setStyleSheet(f"""
             QFrame {{
@@ -1549,11 +1555,27 @@ class VPNApp(QMainWindow):
             }}
         """)
         snap_layout = QVBoxLayout(snap_card)
-        snap_layout.setContentsMargins(16, 14, 16, 14)
-        snap_layout.setSpacing(10)
+        snap_layout.setContentsMargins(12, 8, 12, 10)
+        snap_layout.setSpacing(6)
 
+        # UpSnap Titel + Info
+        snap_hdr = QHBoxLayout()
+        snap_hdr.setSpacing(8)
+        snap_title = QLabel("UpSnap  \u00b7  Wake on LAN")
+        snap_title.setFont(QFont("Segoe UI Variable Text", 9, QFont.Weight.DemiBold))
+        snap_title.setStyleSheet(f"color: {C['dim']}; letter-spacing: 0.3px;")
+        snap_hdr.addWidget(snap_title)
+        snap_hdr.addStretch()
+        self.device_info_label = QLabel("")
+        self.device_info_label.setStyleSheet(f"color: {C['dim']}; font-size: 8pt;")
+        self.device_info_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.device_info_label.hide()
+        snap_hdr.addWidget(self.device_info_label)
+        snap_layout.addLayout(snap_hdr)
+
+        # Login-Zeile
         login_row = QHBoxLayout()
-        login_row.setSpacing(8)
+        login_row.setSpacing(6)
 
         self.lbl_email = QLabel("E-Mail")
         self.lbl_email.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
@@ -1564,8 +1586,6 @@ class VPNApp(QMainWindow):
         self.entry_user.editingFinished.connect(lambda: self._schedule_save())
         login_row.addWidget(self.entry_user)
 
-        login_row.addSpacing(8)
-
         self.lbl_pw = QLabel("Passwort")
         self.lbl_pw.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
         login_row.addWidget(self.lbl_pw)
@@ -1575,8 +1595,6 @@ class VPNApp(QMainWindow):
         self.entry_pass.returnPressed.connect(self._on_upsnap_login)
         self.entry_pass.editingFinished.connect(lambda: self._schedule_save())
         login_row.addWidget(self.entry_pass)
-
-        login_row.addSpacing(8)
 
         self.btn_login = _make_btn("Anmelden", C["accent"], "#000000", C["accent_h"])
         self.btn_login.clicked.connect(self._on_upsnap_login)
@@ -1591,31 +1609,23 @@ class VPNApp(QMainWindow):
         sep.setStyleSheet(f"background-color: {C['border']}; border: none;")
         snap_layout.addWidget(sep)
 
-        # Geräte-Info-Zeile
-        self.device_info_label = QLabel("")
-        self.device_info_label.setStyleSheet(f"color: {C['dim']}; font-size: 8pt;")
-        self.device_info_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.device_info_label.hide()
-        snap_layout.addWidget(self.device_info_label)
-
         # Device-Bereich
         self.device_frame = QVBoxLayout()
         self.device_frame.setSpacing(4)
-        self.upsnap_hint = QLabel("Anmelden, um Geräte anzuzeigen")
-        self.upsnap_hint.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; padding: 8px 0;")
+        self.upsnap_hint = QLabel("Anmelden, um Ger\u00e4te anzuzeigen")
+        self.upsnap_hint.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; padding: 4px 0;")
         self.upsnap_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.device_frame.addWidget(self.upsnap_hint)
         snap_layout.addLayout(self.device_frame)
 
         main_tab_layout.addWidget(snap_card)
-        # etwas Luft am Ende, aber ohne großen Stretch
-        main_tab_layout.addSpacing(8)
+        main_tab_layout.addStretch()
 
         # Einstellungen-Tab
         settings_tab = QWidget()
         settings_layout = QVBoxLayout(settings_tab)
-        settings_layout.setContentsMargins(12, 16, 12, 16)
-        settings_layout.setSpacing(14)
+        settings_layout.setContentsMargins(12, 8, 12, 12)
+        settings_layout.setSpacing(4)
 
         # Server / Ziel
         settings_layout.addWidget(self._section_label("Server / Ziel"))
@@ -1909,7 +1919,8 @@ class VPNApp(QMainWindow):
         """Abschnittsüberschrift im Windows 11 Stil."""
         lbl = QLabel(text)
         lbl.setFont(QFont("Segoe UI Variable Text", 9, QFont.Weight.DemiBold))
-        lbl.setStyleSheet(f"color: {C['dim']}; letter-spacing: 0.3px;")
+        lbl.setStyleSheet(f"color: {C['dim']}; letter-spacing: 0.3px; padding: 2px 0 0 0; margin: 0;")
+        lbl.setContentsMargins(0, 2, 0, 0)
         return lbl
 
     @staticmethod
@@ -1933,7 +1944,6 @@ class VPNApp(QMainWindow):
     def _set_status(self, text: str, color: str):
         self.status_dot.set_color(color)
         self.status_label.setText(text)
-        self.status_label.setStyleSheet(f"color: {color}; background: transparent;")
         self.status_label.setStyleSheet(f"color: {color}; background: transparent;")
 
     # ── Log ────────────────────────────────────────────────────────────────
@@ -2057,6 +2067,9 @@ class VPNApp(QMainWindow):
         self.btn_cancel.show()
         self._set_status("Verbinde...", C["yellow"])
 
+        # Snapshot der aktuellen Einstellungen für den Worker-Thread
+        _target_ip, _target_port = TARGET_IP, TARGET_PORT
+
         def work():
             global _active_config
             r = connect_vpn(path)
@@ -2070,7 +2083,7 @@ class VPNApp(QMainWindow):
                 self.active_config = r
                 _active_config = r
                 self.vpn_connected = True
-                ok = check_connection(TARGET_IP, TARGET_PORT, retries=5, delay=2.0)
+                ok = check_connection(_target_ip, _target_port, retries=5, delay=2.0)
                 self.sig.connected_signal.emit(ok)
             else:
                 self.sig.disconnected_signal.emit()
@@ -2106,11 +2119,11 @@ class VPNApp(QMainWindow):
         self._ping_tick()  # sofort einmal pingen
 
         # Transfer-Stats starten
-        self._transfer_timer.start()
-        self._transfer_tick()
         self._session_rx = 0
         self._session_tx = 0
         self._bw_alerted = False
+        self._transfer_timer.start()
+        self._transfer_tick()
 
         # Watchdog starten
         self._reconnect_retries = 0
@@ -2622,7 +2635,7 @@ class VPNApp(QMainWindow):
                 if c.token:
                     self.upsnap = c
                     devs = c.get_devices()
-                    self.sig.show_devices_signal.emit(devs)
+                    self.sig.show_devices_signal.emit(devs if devs is not None else [])
                     self.sig.logged_in_signal.emit()
                     # Credentials speichern (muss im Main-Thread)
                     QTimer.singleShot(0, self._save_settings)
