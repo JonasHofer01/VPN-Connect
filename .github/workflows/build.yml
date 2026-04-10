@@ -32,10 +32,7 @@ jobs:
         run: python -m py_compile vpn_connect.py
 
       - name: Import test
-        run: python - <<'PY'
-import vpn_connect
-print("import ok")
-PY
+        run: python -c "import vpn_connect; print('import ok')"
 
       - name: Build EXE
         run: |
