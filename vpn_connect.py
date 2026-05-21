@@ -36,7 +36,8 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
+APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -854,6 +855,11 @@ def download_update(url: str, dest: str, progress_cb=None,
         return False
 
 
+def _installed_exe_path(current_exe: Optional[str] = None) -> str:
+    current_exe = current_exe or sys.executable
+    return os.path.join(os.path.dirname(os.path.abspath(current_exe)), APP_EXE_NAME)
+
+
 def apply_update(new_exe: str, exit_app: bool = True) -> bool:
     if not getattr(sys, 'frozen', False):
         log("Update nur als EXE möglich.", "warning")
@@ -874,7 +880,8 @@ def apply_update(new_exe: str, exit_app: bool = True) -> bool:
         log(f"Signaturprüfung konnte nicht ausgeführt werden: {e}", "warning")
 
     current = sys.executable
-    backup = current + ".old"
+    target = _installed_exe_path(current)
+    backup = target + ".old"
     pid = os.getpid()
 
     # Hilfsskript schreiben, das nach Prozessende ersetzt
@@ -884,6 +891,7 @@ def apply_update(new_exe: str, exit_app: bool = True) -> bool:
     script = """$ErrorActionPreference = "Stop"
 $current = "{current}"
 $new = "{new}"
+$target = "{target}"
 $backup = "{backup}"
 $pid = {pid}
 
@@ -906,14 +914,29 @@ function Wait-ForUnlock($path, $retries) {{
 
 if (Test-Path $backup) {{ Remove-Item $backup -Force -ErrorAction SilentlyContinue }}
 
-if (-not (Wait-ForUnlock $current 40)) {{ Write-Host "Datei gesperrt"; exit 1 }}
+$currentFull = [System.IO.Path]::GetFullPath($current)
+$targetFull = [System.IO.Path]::GetFullPath($target)
+$samePath = [System.String]::Equals($currentFull, $targetFull, [System.StringComparison]::OrdinalIgnoreCase)
 
-Move-Item -Force $current $backup
-Move-Item -Force $new $current
+if (-not (Wait-ForUnlock $current 40)) {{ Write-Host "Aktuelle Datei gesperrt"; exit 1 }}
 
-Start-Process $current "--cleanup"
+if ($samePath) {{
+    Move-Item -Force $current $backup
+}} else {{
+    if (Test-Path $target) {{
+        if (-not (Wait-ForUnlock $target 40)) {{ Write-Host "Zieldatei gesperrt"; exit 1 }}
+        Move-Item -Force $target $backup
+    }}
+    if (Test-Path $current) {{
+        Remove-Item $current -Force -ErrorAction SilentlyContinue
+    }}
+}}
+
+Move-Item -Force $new $target
+
+Start-Process $target "--cleanup"
 Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-""".format(current=current, new=new_exe, backup=backup, pid=pid)
+""".format(current=current, new=new_exe, target=target, backup=backup, pid=pid)
     try:
         with open(updater_ps1, "w", encoding="utf-8") as f:
             f.write(script)
@@ -934,7 +957,8 @@ Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 def _cleanup_old_exe():
     if not getattr(sys, 'frozen', False):
         return
-    old = sys.executable + ".old"
+    install_dir = os.path.dirname(os.path.abspath(sys.executable))
+    old = _installed_exe_path() + ".old"
     if os.path.exists(old):
         for _ in range(5):
             try:
@@ -944,6 +968,14 @@ def _cleanup_old_exe():
             except PermissionError:
                 time.sleep(1)
         log("Alte Version konnte nicht gelöscht werden.", "warning")
+    stale_new = os.path.join(install_dir, "VPN_Connect_new.exe")
+    if os.path.abspath(stale_new).lower() != os.path.abspath(sys.executable).lower():
+        try:
+            if os.path.exists(stale_new):
+                os.remove(stale_new)
+                log("Veraltete Update-Datei gelöscht: VPN_Connect_new.exe")
+        except OSError as e:
+            log(f"Veraltete Update-Datei konnte nicht gelöscht werden: {e}", "warning")
 
 
 # =============================================================================
@@ -2176,7 +2208,8 @@ class VPNApp(QMainWindow):
         self.btn_update.setText("⬆ Lade herunter...")
 
         def work():
-            dest = os.path.join(_base_dir, "VPN_Connect_new.exe")
+            temp_dir = os.environ.get("TEMP", _base_dir)
+            dest = os.path.join(temp_dir, f"VPN_Connect_update_{os.getpid()}.exe")
             expected_sha = info.get("sha")
             expected_size = info.get("size", 0)
 

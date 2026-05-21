@@ -230,6 +230,21 @@ class TestReleaseAssetSelection(unittest.TestCase):
         self.assertIsNone(sha)
 
 
+class TestInstalledExePath(unittest.TestCase):
+    """Updater must always install to the stable shortcut target name."""
+
+    def test_current_new_name_maps_to_stable_exe(self):
+        current = os.path.join("C:\\Apps\\VPN", "VPN_Connect_new.exe")
+        expected = os.path.join("C:\\Apps\\VPN", "VPN_Connect.exe")
+
+        self.assertEqual(vpn_connect._installed_exe_path(current), expected)
+
+    def test_current_stable_name_stays_stable(self):
+        current = os.path.join("C:\\Apps\\VPN", "VPN_Connect.exe")
+
+        self.assertEqual(vpn_connect._installed_exe_path(current), current)
+
+
 if __name__ == "__main__":
     # Initialize QApplication before tests (needed for PyQt6 imports in vpn_connect)
     qapp = QApplication.instance()
