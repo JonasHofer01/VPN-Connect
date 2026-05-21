@@ -1,48 +1,24 @@
-' VPN Connect Launcher
-' Startet vpn_connect.py ueber das signierte pythonw.exe (umgeht Smart App Control)
+Option Explicit
 
-Set WshShell = CreateObject("WScript.Shell")
-Set FSO = CreateObject("Scripting.FileSystemObject")
+Dim fso, shell, scriptDir, appScript, pythonExe
 
-' Pfad zum Skript ermitteln
-scriptDir = FSO.GetParentFolderName(WScript.ScriptFullName)
-pyScript = FSO.BuildPath(scriptDir, "vpn_connect.py")
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set shell = CreateObject("Shell.Application")
 
-' Python-Pfade durchsuchen
-pythonExe = ""
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
+appScript = fso.BuildPath(scriptDir, "vpn_connect.py")
 
-' 1. Versuche venv im Projektordner
-venvPython = FSO.BuildPath(scriptDir, ".venv\Scripts\pythonw.exe")
-If FSO.FileExists(venvPython) Then
-    pythonExe = venvPython
+If Not fso.FileExists(appScript) Then
+    MsgBox "vpn_connect.py wurde nicht gefunden:" & vbCrLf & appScript, vbCritical, "VPN Connect"
+    WScript.Quit 1
 End If
 
-' 2. Versuche System-Python (verschiedene Versionen)
-If pythonExe = "" Then
-    Dim versions
-    versions = Array("3.14", "3.13", "3.12", "3.11", "3.10")
-    For Each ver In versions
-        On Error Resume Next
-        Dim regPath
-        regPath = WshShell.RegRead("HKLM\SOFTWARE\Python\PythonCore\" & ver & "\InstallPath\")
-        If Err.Number = 0 And regPath <> "" Then
-            Dim candidate
-            candidate = regPath & "pythonw.exe"
-            If FSO.FileExists(candidate) Then
-                pythonExe = candidate
-                Exit For
-            End If
-        End If
-        Err.Clear
-        On Error GoTo 0
-    Next
+pythonExe = fso.BuildPath(scriptDir, ".venv\Scripts\pythonw.exe")
+If Not fso.FileExists(pythonExe) Then
+    pythonExe = fso.BuildPath(scriptDir, ".venv\Scripts\python.exe")
 End If
-
-' 3. Fallback: pythonw.exe im PATH
-If pythonExe = "" Then
+If Not fso.FileExists(pythonExe) Then
     pythonExe = "pythonw.exe"
 End If
 
-' Direkt starten - das Skript selbst fordert Admin-Rechte an via ShellExecuteW
-WshShell.CurrentDirectory = scriptDir
-WshShell.Run """" & pythonExe & """ """ & pyScript & """", 0, False
+shell.ShellExecute pythonExe, """" & appScript & """", scriptDir, "runas", 1

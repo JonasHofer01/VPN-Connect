@@ -38,15 +38,24 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name VPN_Connect --uac-admin vpn_connect.py
 
+      - name: Generate SHA256
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 "dist\VPN_Connect.exe").Hash.ToLowerInvariant()
+          Set-Content -Path "dist\VPN_Connect.exe.sha256" -Value "$hash  VPN_Connect.exe" -Encoding ASCII
+
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
         with:
           name: VPN_Connect
-          path: dist/VPN_Connect.exe
+          path: |
+            dist/VPN_Connect.exe
+            dist/VPN_Connect.exe.sha256
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/VPN_Connect.exe
+          files: |
+            dist/VPN_Connect.exe
+            dist/VPN_Connect.exe.sha256
           generate_release_notes: true
 

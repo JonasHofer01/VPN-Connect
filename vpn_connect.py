@@ -36,7 +36,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "3.0.0"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
 CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
@@ -219,12 +219,21 @@ def _default_gateway() -> Optional[str]:
 def _parse_networks(items: List[str]) -> List[ipaddress._BaseNetwork]:
     nets = []
     for item in items:
+        item = item.strip()
+        if not item:
+            continue
         try:
             if "/" in item:
                 nets.append(ipaddress.ip_network(item, strict=False))
             else:
-                nets.append(ipaddress.ip_network(item + "/32", strict=False))
-        except Exception:
+                try:
+                    nets.append(ipaddress.ip_network(item + "/32", strict=False))
+                except ValueError:
+                    # DNS resolution for domains
+                    ip = socket.gethostbyname(item)
+                    nets.append(ipaddress.ip_network(ip + "/32", strict=False))
+        except Exception as e:
+            log(f"Konnte Netzwerk/Domain '{item}' nicht parsen: {e}", "warning")
             continue
     return nets
 
@@ -417,26 +426,27 @@ def _dialog_dismisser_loop():
             try:
                 found: list[int] = []
 
-                @WNDENUMPROC
-                def _cb(hwnd, _):
-                    if not user32.IsWindowVisible(hwnd):
-                        return True
+                def _cb(hwnd: int, lparam: int) -> bool:
                     title_buf = ctypes.create_unicode_buffer(256)
+                    cls_buf = ctypes.create_unicode_buffer(256)
                     user32.GetWindowTextW(hwnd, title_buf, 256)
+                    user32.GetClassNameW(hwnd, cls_buf, 256)
                     title = title_buf.value
-
-                    cls_buf = ctypes.create_unicode_buffer(64)
-                    user32.GetClassNameW(hwnd, cls_buf, 64)
                     cls = cls_buf.value
 
-                    if cls == "#32770" and _get_proc_name(hwnd) == "wireguard.exe":
-                        found.append(hwnd)
+                    if not user32.IsWindowVisible(hwnd):
                         return True
-                    if title in BAD_TITLES and cls in ("#32770", "TaskManagerWindow"):
-                        found.append(hwnd)
+
+                    proc_name = _get_proc_name(hwnd)
+                    if proc_name == "wireguard.exe":
+                        if cls == "#32770":
+                            found.append(hwnd)
+                            return True
+                        if title in BAD_TITLES and cls in ("#32770", "TaskManagerWindow"):
+                            found.append(hwnd)
                     return True
 
-                user32.EnumWindows(_cb, 0)
+                user32.EnumWindows(WNDENUMPROC(_cb), 0)
 
                 for hwnd in found:
                     title_buf = ctypes.create_unicode_buffer(256)
@@ -692,6 +702,52 @@ def _parse_version(tag: str) -> tuple:
     return tuple(parts)
 
 
+def _select_update_assets(assets: list) -> Tuple[Optional[dict], Optional[dict]]:
+    exe_assets = [
+        asset for asset in assets
+        if str(asset.get("name", "")).lower().endswith(".exe")
+    ]
+    if not exe_assets:
+        return None, None
+
+    exe_asset = next(
+        (asset for asset in exe_assets
+         if str(asset.get("name", "")).lower() == "vpn_connect.exe"),
+        exe_assets[0],
+    )
+    exe_name = str(exe_asset.get("name", "")).lower()
+    exe_stem = exe_name[:-4] if exe_name.endswith(".exe") else exe_name
+
+    sha_suffixes = (".sha256", ".sha256.txt", ".sha256sum")
+    sha_assets = [
+        asset for asset in assets
+        if str(asset.get("name", "")).lower().endswith(sha_suffixes)
+    ]
+    expected_names = {
+        f"{exe_name}.sha256",
+        f"{exe_name}.sha256.txt",
+        f"{exe_stem}.sha256",
+        f"{exe_stem}.sha256.txt",
+        f"{exe_stem}.sha256sum",
+    }
+
+    sha_asset = next(
+        (asset for asset in sha_assets
+         if str(asset.get("name", "")).lower() in expected_names),
+        None,
+    )
+    if not sha_asset:
+        sha_asset = next(
+            (asset for asset in sha_assets
+             if exe_stem and exe_stem in str(asset.get("name", "")).lower()),
+            None,
+        )
+    if not sha_asset and len(sha_assets) == 1:
+        sha_asset = sha_assets[0]
+
+    return exe_asset, sha_asset
+
+
 def check_for_update() -> Optional[dict]:
     api = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
     try:
@@ -708,14 +764,7 @@ def check_for_update() -> Optional[dict]:
             log(f"Kein Update (lokal={APP_VERSION}, remote={remote_tag}).")
             return None
 
-        exe_asset = None
-        sha_asset = None
-        for asset in data.get("assets", []):
-            if asset["name"].lower().endswith(".exe"):
-                exe_asset = asset
-            if any(asset["name"].lower().endswith(suf) for suf in
-                   (".sha256", ".sha256.txt", ".sha256sum")):
-                sha_asset = asset
+        exe_asset, sha_asset = _select_update_assets(data.get("assets", []))
 
         if exe_asset:
             sha_hex = None
@@ -805,25 +854,24 @@ def download_update(url: str, dest: str, progress_cb=None,
         return False
 
 
-def apply_update(new_exe: str) -> None:
+def apply_update(new_exe: str, exit_app: bool = True) -> bool:
     if not getattr(sys, 'frozen', False):
         log("Update nur als EXE möglich.", "warning")
-        return
+        return False
     if not os.path.exists(new_exe):
         log(f"Update-Datei fehlt: {new_exe}", "error")
-        return
+        return False
 
-    # Signatur prüfen
+    # Signatur prüfen (Best Effort / Warnung)
     try:
         r = _run_silent(["signtool", "verify", "/pa", new_exe],
                         capture_output=True, text=True, timeout=15)
         if r.returncode != 0:
-            log(f"Signaturprüfung fehlgeschlagen: {r.stdout or r.stderr}", "error")
-            return
-        log("Signaturprüfung erfolgreich.")
+            log(f"Signaturprüfung fehlgeschlagen (rc={r.returncode}): {r.stdout or r.stderr}", "warning")
+        else:
+            log("Signaturprüfung erfolgreich.")
     except Exception as e:
-        log(f"Signaturprüfung konnte nicht ausgeführt werden: {e}", "error")
-        return
+        log(f"Signaturprüfung konnte nicht ausgeführt werden: {e}", "warning")
 
     current = sys.executable
     backup = current + ".old"
@@ -875,9 +923,12 @@ Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
                           "-File", updater_ps1],
                          creationflags=CREATE_NO_WINDOW)
         log("Updater gestartet, Anwendung wird beendet...")
-        sys.exit(0)
+        if exit_app:
+            sys.exit(0)
+        return True
     except Exception as e:
         log(f"Update-Installation fehlgeschlagen: {e}", "error")
+        return False
 
 
 def _cleanup_old_exe():
@@ -922,11 +973,22 @@ C = {
     "cyan":      "#22d3ee",
 }
 
+
+def _apply_accent_color(hex_code: str) -> None:
+    color = QColor(hex_code)
+    if not color.isValid():
+        return
+    C["accent"] = color.name()
+    C["accent_h"] = color.lighter(130).name()
+    C["cyan"] = color.name()
+
+
 # =============================================================================
 #  GLOBAL STYLESHEET
 # =============================================================================
 
-GLOBAL_QSS = f"""
+def get_global_qss():
+    return f"""
 QMainWindow {{
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
         stop:0 #0b1222, stop:0.5 #0f172a, stop:1 #0b1a33);
@@ -1133,6 +1195,7 @@ class AppSignals(QObject):
     update_progress_signal = pyqtSignal(str)
     update_failed_signal = pyqtSignal()
     apply_update_signal = pyqtSignal(str)
+    update_ready_to_exit_signal = pyqtSignal()
     device_status_signal = pyqtSignal(object, str, str)  # label, text, color
     btns_state_signal = pyqtSignal(list, bool)            # btn_refs, enabled
     trigger_rdp_signal = pyqtSignal(str, str, list, object, str, str)  # ip, name, btns, lbl, user, pw
@@ -1240,10 +1303,12 @@ class VPNApp(QMainWindow):
         self._update_info: Optional[dict] = None
         self._history_visible = False
         self._session_start_time: float = 0
-        self._session_config_name: str = ""
         self._favorites: List[str] = []        # device IDs
+        self._last_devices: List[dict] = []    # Cache für sofortiges UI Rebuild/Resort
+        self.accent_color_pref = C["accent"]   # Initialer Akzentfarben-Wert
         self._rdp_users: dict = {}             # device_name -> username
         self._rdp_passwords: dict = {}         # device_name -> password (base64)
+        self._session_config_name: str = ""
         self._last_target_ip: str = TARGET_IP
         self._last_target_port: int = TARGET_PORT
         self._local_ping_tasks: set = set()
@@ -1334,6 +1399,7 @@ class VPNApp(QMainWindow):
             lambda t: self.btn_update.setText(t))
         self.sig.update_failed_signal.connect(self._on_update_failed)
         self.sig.apply_update_signal.connect(self._apply_update)
+        self.sig.update_ready_to_exit_signal.connect(self._exit_for_update)
         self.sig.device_status_signal.connect(self._set_device_status)
         self.sig.btns_state_signal.connect(self._set_btns)
         self.sig.trigger_rdp_signal.connect(
@@ -1726,9 +1792,76 @@ class VPNApp(QMainWindow):
         self.cmb_rdp_res.addItem("Auto", None)
         for w, h in [(1920, 1080), (1600, 900), (1366, 768), (1280, 720)]:
             self.cmb_rdp_res.addItem(f"{w} x {h}", (w, h))
+        self.cmb_rdp_res.currentIndexChanged.connect(lambda: self._schedule_save())
         rdp_layout.addWidget(self.cmb_rdp_res)
+
+        rdp_layout.addSpacing(16)
+
+        self.chk_rdp_fullscreen = QCheckBox("Vollbild")
+        self.chk_rdp_fullscreen.setStyleSheet(chk_qss)
+        self.chk_rdp_fullscreen.stateChanged.connect(lambda: self._schedule_save())
+        rdp_layout.addWidget(self.chk_rdp_fullscreen)
+
+        self.chk_rdp_multimon = QCheckBox("Alle Monitore")
+        self.chk_rdp_multimon.setStyleSheet(chk_qss)
+        self.chk_rdp_multimon.stateChanged.connect(lambda: self._schedule_save())
+        rdp_layout.addWidget(self.chk_rdp_multimon)
+
         rdp_layout.addStretch()
         settings_layout.addWidget(rdp_card)
+
+        # Design (Farbschema)
+        settings_layout.addWidget(self._section_label("Design"))
+        color_card = QFrame()
+        color_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {C['card']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        color_layout = QHBoxLayout(color_card)
+        color_layout.setContentsMargins(16, 12, 16, 12)
+        color_layout.setSpacing(12)
+
+        color_layout.addWidget(QLabel("Akzentfarbe (erfordert Neustart):"))
+
+        self.color_group = []
+        colors = [
+            ("#22d3ee", "Cyan"),
+            ("#34d399", "Grün"),
+            ("#f43f5e", "Rot"),
+            ("#fbbf24", "Gelb"),
+            ("#a855f7", "Violett")
+        ]
+
+        for hex_code, name in colors:
+            btn = QPushButton(name)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {C['surface']};
+                    border: 2px solid {hex_code};
+                    color: {hex_code};
+                    border-radius: 4px;
+                    padding: 4px 12px;
+                }}
+                QPushButton:hover {{
+                    background-color: {hex_code};
+                    color: #fff;
+                }}
+                QPushButton:checked {{
+                    background-color: {hex_code};
+                    color: #000;
+                    font-weight: bold;
+                }}
+            """)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, h=hex_code, b=btn: self._on_color_selected(h, b))
+            self.color_group.append((hex_code, btn))
+            color_layout.addWidget(btn)
+
+        color_layout.addStretch()
+        settings_layout.addWidget(color_card)
 
         # Log (Protokoll)
         self.log_toggle = QPushButton("›  Protokoll")
@@ -1923,6 +2056,12 @@ class VPNApp(QMainWindow):
         lbl.setContentsMargins(0, 2, 0, 0)
         return lbl
 
+    def _on_color_selected(self, hex_code: str, btn: QPushButton):
+        for h, b in self.color_group:
+            b.setChecked(b == btn)
+        self.accent_color_pref = hex_code
+        self._schedule_save()
+
     @staticmethod
     def _expander_btn_qss() -> str:
         """QSS für aufklappbare Sektions-Buttons."""
@@ -1978,20 +2117,38 @@ class VPNApp(QMainWindow):
 
     # ── Configs ────────────────────────────────────────────────────────────
 
+    def _tray_quick_connect(self, config_path: str):
+        # find index to set active list
+        for i in range(self.config_listbox.count()):
+            if i < len(self.configs) and self.configs[i][1] == config_path:
+                self.config_listbox.setCurrentRow(i)
+                break
+        self._on_connect()
+
     def _load_configs(self):
         self.configs = collect_all_configs()
         self.config_listbox.clear()
+        self.tray_connect_menu.clear()
         if not self.configs:
             self.config_listbox.addItem("  Keine Konfigurationen gefunden")
             self.btn_connect.setEnabled(False)
+            act_none = QAction("Keine Konfigurationen gefunden", self)
+            act_none.setEnabled(False)
+            self.tray_connect_menu.addAction(act_none)
         else:
-            for name, _ in self.configs:
+            for name, path in self.configs:
                 self.config_listbox.addItem(f"  {name}")
+                act = QAction(name, self)
+                act.triggered.connect(lambda checked, p=path: self._tray_quick_connect(p))
+                self.tray_connect_menu.addAction(act)
             self.config_listbox.setCurrentRow(0)
 
     # ── Auto-Update ────────────────────────────────────────────────────────
 
     def _check_update_bg(self):
+        if not getattr(sys, 'frozen', False):
+            log("Update-Check im Python-Modus übersprungen.")
+            return
         info = check_for_update()
         if info:
             self._update_info = info
@@ -2046,15 +2203,34 @@ class VPNApp(QMainWindow):
 
     def _on_update_failed(self):
         self.btn_update.setEnabled(True)
-        self.btn_update.setText("⬆ Download fehlgeschlagen")
-        QMessageBox.critical(self, "Update", "Download fehlgeschlagen.")
+        self.btn_update.setText("⬆ Update fehlgeschlagen")
+        QMessageBox.critical(self, "Update", "Update fehlgeschlagen.")
 
     def _apply_update(self, new_exe: str):
-        log("Installiere Update...")
-        if self.active_config:
-            disconnect_vpn(self.active_config)
-        self._remove_split_routes()
-        apply_update(new_exe)
+        self.btn_update.setEnabled(False)
+        self.btn_update.setText("⬆ Installiere...")
+        active_config = self.active_config
+
+        def work():
+            log("Installiere Update...")
+            try:
+                if active_config:
+                    disconnect_vpn(active_config)
+                self._remove_split_routes()
+                if apply_update(new_exe, exit_app=False):
+                    self.sig.update_ready_to_exit_signal.emit()
+                else:
+                    self.sig.update_failed_signal.emit()
+            except Exception as e:
+                log(f"Update-Installation fehlgeschlagen: {e}", "error")
+                self.sig.update_failed_signal.emit()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _exit_for_update(self):
+        self._save_settings()
+        _stop_dialog_dismisser()
+        QApplication.quit()
 
     # ── VPN Connect ────────────────────────────────────────────────────────
 
@@ -2157,6 +2333,8 @@ class VPNApp(QMainWindow):
                 tip += f" ({extract_tunnel_name(self.active_config)})"
             self._tray.setToolTip(tip)
             self._tray_act_toggle.setText("Trennen")
+            self._tray_act_toggle.setVisible(True)
+            self.tray_connect_menu.menuAction().setVisible(False)
         self._update_window_title()
 
         # Auto-Login bei UpSnap
@@ -2201,6 +2379,8 @@ class VPNApp(QMainWindow):
         if hasattr(self, '_tray') and self._tray:
             self._tray.setToolTip(f"VPN Connect - Getrennt")
             self._tray_act_toggle.setText("Verbinden")
+            self._tray_act_toggle.setVisible(False)
+            self.tray_connect_menu.menuAction().setVisible(True)
 
         self._update_window_title()
         self._remove_split_routes()
@@ -2286,6 +2466,7 @@ class VPNApp(QMainWindow):
         enc_pw = _dpapi_protect(p)
         # RDP-Passwoerter: aus Base64 decodieren, dann DPAPI sichern
         rdp_pw_enc: dict = {}
+        rdp_pw_fallback: dict = {}
         for host, pw_b64 in self._rdp_passwords.items():
             try:
                 pw_plain = base64.b64decode(pw_b64.encode("ascii")).decode("utf-8")
@@ -2295,6 +2476,8 @@ class VPNApp(QMainWindow):
                 enc = _dpapi_protect(pw_plain)
                 if enc:
                     rdp_pw_enc[host] = enc
+                else:
+                    rdp_pw_fallback[host] = pw_b64
 
         try:
             port_txt = self.entry_target_port.text().strip()
@@ -2309,16 +2492,19 @@ class VPNApp(QMainWindow):
                 "user": u,
                 "pw_enc": enc_pw,
                 "pw_b64": base64.b64encode(p.encode("utf-8")).decode("ascii") if p else "",
+                "accent_color": self.accent_color_pref,
                 "last_config": self.config_listbox.currentRow(),
                 "auto_reconnect": self.chk_auto_reconnect.isChecked(),
                 "auto_connect": self.chk_auto_connect.isChecked(),
                 "favorites": self._favorites,
                 "rdp_users": self._rdp_users,
-                "rdp_passwords": self._rdp_passwords,          # Fallback (alt)
+                "rdp_passwords": rdp_pw_fallback,          # Nur Fallback (wenn DPAPI fehlschlägt)
                 "rdp_passwords_enc": rdp_pw_enc,
                 "target_ip": self.entry_target_ip.text().strip(),
                 "target_port": port_val,
                 "rdp_resolution": self.cmb_rdp_res.currentData(),
+                "rdp_fullscreen": self.chk_rdp_fullscreen.isChecked(),
+                "rdp_multimon": self.chk_rdp_multimon.isChecked(),
                 "split_excludes": self._split_excludes,
                 "schedule_enable": self._schedule_enable,
                 "schedule_connect": self._schedule_connect,
@@ -2356,82 +2542,90 @@ class VPNApp(QMainWindow):
         _auto_connect = False
         try:
             d = self._read_settings_file()
-            if not d:
-                return
+            if d:
+                self.entry_user.setText(d.get("user", ""))
 
-            self.entry_user.setText(d.get("user", ""))
+                # Passwort: bevorzugt DPAPI, sonst Base64, sonst Plaintext
+                pw_plain = ""
+                if d.get("pw_enc"):
+                    pw_plain = _dpapi_unprotect(d.get("pw_enc", ""))
+                if not pw_plain and d.get("pw_b64"):
+                    try:
+                        pw_plain = base64.b64decode(d["pw_b64"].encode("ascii")).decode("utf-8")
+                    except Exception:
+                        pw_plain = ""
+                if not pw_plain and d.get("pw"):
+                    pw_plain = d["pw"]
+                    QTimer.singleShot(500, self._save_settings)  # Migriert auf DPAPI
+                self.entry_pass.setText(pw_plain)
 
-            # Passwort: bevorzugt DPAPI, sonst Base64, sonst Plaintext
-            pw_plain = ""
-            if d.get("pw_enc"):
-                pw_plain = _dpapi_unprotect(d.get("pw_enc", ""))
-            if not pw_plain and d.get("pw_b64"):
-                try:
-                    pw_plain = base64.b64decode(d["pw_b64"].encode("ascii")).decode("utf-8")
-                except Exception:
-                    pw_plain = ""
-            if not pw_plain and d.get("pw"):
-                pw_plain = d["pw"]
-                QTimer.singleShot(500, self._save_settings)  # Migriert auf DPAPI
-            self.entry_pass.setText(pw_plain)
+                # Letzte Config
+                idx = d.get("last_config", 0)
+                if 0 <= idx < self.config_listbox.count():
+                    self.config_listbox.setCurrentRow(idx)
 
-            # Letzte Config
-            idx = d.get("last_config", 0)
-            if 0 <= idx < self.config_listbox.count():
-                self.config_listbox.setCurrentRow(idx)
+                # Auto-Reconnect
+                self.chk_auto_reconnect.setChecked(d.get("auto_reconnect", False))
 
-            # Auto-Reconnect
-            self.chk_auto_reconnect.setChecked(d.get("auto_reconnect", False))
+                # Auto-Connect
+                self.chk_auto_connect.setChecked(d.get("auto_connect", False))
 
-            # Auto-Connect
-            self.chk_auto_connect.setChecked(d.get("auto_connect", False))
+                # Favoriten & RDP-User & RDP-Passwörter
+                self._favorites = d.get("favorites", [])
+                self._rdp_users = d.get("rdp_users", {})
+                self._rdp_passwords = {}
+                # Fallback (alt/DPAPI fehlgeschlagen) laden
+                fallback_rdp = d.get("rdp_passwords", {})
+                if fallback_rdp:
+                    self._rdp_passwords.update(fallback_rdp)
+                # Mit DPAPI-geschützten überschreiben
+                rdp_enc = d.get("rdp_passwords_enc", {})
+                if rdp_enc:
+                    for host, enc in rdp_enc.items():
+                        pw_plain = _dpapi_unprotect(enc)
+                        if pw_plain:
+                            self._rdp_passwords[host] = base64.b64encode(
+                                pw_plain.encode("utf-8")).decode("ascii")
 
-            # Favoriten & RDP-User & RDP-Passwörter
-            self._favorites = d.get("favorites", [])
-            self._rdp_users = d.get("rdp_users", {})
-            self._rdp_passwords = {}
-            rdp_enc = d.get("rdp_passwords_enc", {})
-            if rdp_enc:
-                for host, enc in rdp_enc.items():
-                    pw_plain = _dpapi_unprotect(enc)
-                    if pw_plain:
-                        self._rdp_passwords[host] = base64.b64encode(
-                            pw_plain.encode("utf-8")).decode("ascii")
-            else:
-                self._rdp_passwords = d.get("rdp_passwords", {})
+                # Design Accent Color laden und UI Button checken
+                self.accent_color_pref = d.get("accent_color", C["accent"])
+                for h, b in self.color_group:
+                    b.setChecked(h == self.accent_color_pref)
 
-            # Server IP + Port laden und anwenden
-            saved_ip = d.get("target_ip", "")
-            saved_port = d.get("target_port", TARGET_PORT)
-            if saved_ip:
-                self.entry_target_ip.setText(saved_ip)
-            self.entry_target_port.setText(str(saved_port))
-            self._apply_server_settings(save=False)
+                # Server IP + Port laden und anwenden
+                saved_ip = d.get("target_ip", "")
+                saved_port = d.get("target_port", TARGET_PORT)
+                if saved_ip:
+                    self.entry_target_ip.setText(saved_ip)
+                self.entry_target_port.setText(str(saved_port))
+                self._apply_server_settings(save=False)
 
-            # RDP Auflösung
-            saved_res = d.get("rdp_resolution", None)
-            if saved_res:
-                for i in range(self.cmb_rdp_res.count()):
-                    if self.cmb_rdp_res.itemData(i) == tuple(saved_res):
-                        self.cmb_rdp_res.setCurrentIndex(i)
-                        break
-            self.btn_login.setEnabled(bool(TARGET_IP) and (self.upsnap is None))
+                # RDP Auflösung
+                saved_res = d.get("rdp_resolution", None)
+                if saved_res:
+                    for i in range(self.cmb_rdp_res.count()):
+                        if self.cmb_rdp_res.itemData(i) == tuple(saved_res):
+                            self.cmb_rdp_res.setCurrentIndex(i)
+                            break
+                self.chk_rdp_fullscreen.setChecked(d.get("rdp_fullscreen", False))
+                self.chk_rdp_multimon.setChecked(d.get("rdp_multimon", False))
+                self.btn_login.setEnabled(bool(TARGET_IP) and (self.upsnap is None))
 
-            self._split_excludes = d.get("split_excludes", [])
-            self._schedule_enable = d.get("schedule_enable", False)
-            self._schedule_connect = d.get("schedule_connect", "")
-            self._schedule_disconnect = d.get("schedule_disconnect", "")
-            self._bw_threshold_mb = int(d.get("bw_threshold_mb", 0) or 0)
-            self._http_check_url = d.get("http_check_url", "")
-            self.chk_schedule.setChecked(self._schedule_enable)
-            self.entry_sched_connect.setText(self._schedule_connect)
-            self.entry_sched_disconnect.setText(self._schedule_disconnect)
-            self.entry_bw.setText(str(self._bw_threshold_mb or ""))
-            self.entry_http.setText(self._http_check_url)
-            self.split_text.setPlainText("\n".join(self._split_excludes))
+                self._split_excludes = d.get("split_excludes", [])
+                self._schedule_enable = d.get("schedule_enable", False)
+                self._schedule_connect = d.get("schedule_connect", "")
+                self._schedule_disconnect = d.get("schedule_disconnect", "")
+                self._bw_threshold_mb = int(d.get("bw_threshold_mb", 0) or 0)
+                self._http_check_url = d.get("http_check_url", "")
+                self.chk_schedule.setChecked(self._schedule_enable)
+                self.entry_sched_connect.setText(self._schedule_connect)
+                self.entry_sched_disconnect.setText(self._schedule_disconnect)
+                self.entry_bw.setText(str(self._bw_threshold_mb or ""))
+                self.entry_http.setText(self._http_check_url)
+                self.split_text.setPlainText("\n".join(self._split_excludes))
 
-            # Auto-Connect beim Start
-            _auto_connect = d.get("auto_connect", False) and bool(self.configs)
+                # Auto-Connect beim Start
+                _auto_connect = d.get("auto_connect", False) and bool(self.configs)
 
         except Exception:
             _auto_connect = False
@@ -2484,6 +2678,8 @@ class VPNApp(QMainWindow):
                 if hasattr(self, '_tray') and self._tray:
                     self._tray.setToolTip("VPN Connect - Verbunden")
                     self._tray_act_toggle.setText("Trennen")
+                    self._tray_act_toggle.setVisible(True)
+                    self.tray_connect_menu.menuAction().setVisible(False)
 
                 self._notify("VPN verbunden", f"{name} – erkannt.")
                 QTimer.singleShot(500, lambda: self.sig.auto_login_signal.emit())
@@ -2534,11 +2730,12 @@ class VPNApp(QMainWindow):
             return
         for net in self._routes_added:
             try:
-                _run_silent(["route", "delete", net],
+                base_ip = net.split("/")[0]
+                _run_silent(["route", "delete", base_ip],
                             capture_output=True, text=True, timeout=5)
-                log(f"Split-Tunnel Route entfernt: {net}")
-            except Exception:
-                pass
+                log(f"Split-Tunnel Route entfernt: {base_ip} (von {net})")
+            except Exception as e:
+                log(f"Fehler beim Entfernen der Route {net}: {e}", "warning")
         self._routes_added.clear()
 
     def _apply_server_settings(self, save: bool = True):
@@ -2682,6 +2879,7 @@ class VPNApp(QMainWindow):
     # ── Device-Anzeige ─────────────────────────────────────────────────────
 
     def _show_devices(self, devices: List[dict]):
+        self._last_devices = devices
         # Smart-Refresh: Hash berechnen (nur relevante Felder)
         hash_data = [(d.get("id", ""), d.get("name", ""), d.get("ip", ""),
                        d.get("status", "")) for d in devices]
@@ -2956,13 +3154,20 @@ class VPNApp(QMainWindow):
                 # Kein Credential-Prompt wenn cmdkey gesetzt
                 f.write(f"prompt for credentials:i:{'0' if (username and password) else '1'}\n")
                 f.write("authentication level:i:0\n")
-                res = self.cmb_rdp_res.currentData() if hasattr(self, "cmb_rdp_res") else None
-                if res:
-                    w, h = res
+                if hasattr(self, 'chk_rdp_fullscreen') and self.chk_rdp_fullscreen.isChecked():
                     f.write("screen mode id:i:2\n")
-                    f.write(f"desktopwidth:i:{w}\n")
-                    f.write(f"desktopheight:i:{h}\n")
-                    f.write("session bpp:i:32\n")
+                else:
+                    f.write("screen mode id:i:1\n")
+                    res = self.cmb_rdp_res.currentData() if hasattr(self, "cmb_rdp_res") else None
+                    if res:
+                        w, h = res
+                        f.write(f"desktopwidth:i:{w}\n")
+                        f.write(f"desktopheight:i:{h}\n")
+
+                if hasattr(self, 'chk_rdp_multimon') and self.chk_rdp_multimon.isChecked():
+                    f.write("use multimon:i:1\n")
+
+                f.write("session bpp:i:32\n")
                 if username:
                     f.write(f"username:s:{username}\n")
             subprocess.Popen(["explorer.exe", rdp_path])
@@ -3427,6 +3632,11 @@ class VPNApp(QMainWindow):
                 C["dim"], C["yellow"]))
         self._save_settings()
 
+        # Sofortige UI-Sortierungsaktualisierung
+        if hasattr(self, '_last_devices') and self._last_devices:
+            self._devices_hash = ""  # Hash löschen, um Rebuild zu erzwingen
+            self._show_devices(self._last_devices)
+
     # ── RDP-Credentials Dialog ────────────────────────────────────────────
 
     def _ask_rdp_credentials(self, device_name: str) -> tuple:
@@ -3522,8 +3732,11 @@ class VPNApp(QMainWindow):
 
         menu.addSeparator()
 
-        self._tray_act_toggle = QAction("Verbinden", self)
+        self.tray_connect_menu = menu.addMenu("Verbinden mit...")
+
+        self._tray_act_toggle = QAction("Trennen", self)
         self._tray_act_toggle.triggered.connect(self._tray_toggle_vpn)
+        self._tray_act_toggle.setVisible(False)
         menu.addAction(self._tray_act_toggle)
 
         menu.addSeparator()
@@ -3547,10 +3760,8 @@ class VPNApp(QMainWindow):
     def _tray_toggle_vpn(self):
         if self.vpn_connected:
             self._on_disconnect()
-            self._tray_act_toggle.setText("Verbinden")
         else:
             self._on_connect()
-            self._tray_act_toggle.setText("Trennen")
 
     def _tray_quit(self):
         """Wirklich beenden (über Tray)."""
@@ -3618,12 +3829,25 @@ def main():
     # Immer beim Start aufräumen – löscht .old-Datei von vorherigem Update
     _cleanup_old_exe()
 
+    # Settings einlesen für Custom Accent Color vor UI-Erstellung
+    try:
+        import json
+        settings_file = os.path.join(_base_dir, "vpn_settings.json")
+        if os.path.exists(settings_file):
+            with open(settings_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                acc = data.get("accent_color")
+                if acc:
+                    _apply_accent_color(acc)
+    except Exception:
+        pass
+
     if not is_admin():
         run_as_admin()
         sys.exit()
 
     app = QApplication(sys.argv)
-    app.setStyleSheet(GLOBAL_QSS)
+    app.setStyleSheet(get_global_qss())
     app.setStyle("Fusion")
 
     _app = VPNApp()
