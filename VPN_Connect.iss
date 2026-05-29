@@ -2,7 +2,7 @@
 ; Inno Setup Script für VPN Connect
 
 #ifndef AppVersion
-  #define AppVersion "3.1.0"
+  #define AppVersion "3.1.1"
 #endif
 
 [Setup]
@@ -12,6 +12,7 @@ DefaultDirName={commonpf}\VPN Connect
 DefaultGroupName=VPN Connect
 OutputDir=dist
 OutputBaseFilename=VPN_Connect_Setup
+SetupIconFile=assets\app_icon.ico
 Compression=lzma
 SolidCompression=yes
 PrivilegesRequired=admin
@@ -30,6 +31,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "dist\VPN_Connect.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "assets\app_icon.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\VPN Connect"; Filename: "{app}\VPN_Connect.exe"
@@ -37,8 +39,8 @@ Name: "{group}\{cm:UninstallProgram,VPN Connect}"; Filename: "{uninstallexe}"
 Name: "{userdesktop}\VPN Connect"; Filename: "{app}\VPN_Connect.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\VPN_Connect.exe"; Description: "{cm:LaunchProgram,VPN Connect}"; Flags: nowait postinstall skipifsilent
-Filename: "{app}\VPN_Connect.exe"; Flags: nowait; Check: IsSilent
+Filename: "{app}\VPN_Connect.exe"; Description: "{cm:LaunchProgram,VPN Connect}"; Flags: nowait postinstall skipifsilent runascurrentuser
+Filename: "{app}\VPN_Connect.exe"; Flags: nowait runascurrentuser; Check: IsSilent
 
 [Code]
 function IsSilent: Boolean;

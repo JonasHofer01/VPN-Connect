@@ -8,26 +8,31 @@ Eine Windows-Desktop-App zum Verbinden mit WireGuard VPN, Wake-on-LAN via UpSnap
 ## Features
 
 - **WireGuard VPN** – Tunnel verbinden/trennen mit einem Klick
-- **UpSnap Integration** – Geräte per Wake-on-LAN aufwecken
+- **CasaOS/UpSnap Integration** – Geräte per Wake-on-LAN aufwecken
 - **RDP** – Remote-Desktop direkt aus der App starten
 - **Auto-Update** – Neue Versionen werden automatisch von GitHub heruntergeladen
 
 ## Installation
 
-### Variante A: EXE (empfohlen)
+### Variante A: Installer (empfohlen)
 
-1. Lade die neueste `VPN_Connect.exe` von den [Releases](https://github.com/JonasHofer01/VPN-Connect/releases) herunter
+1. Lade die neueste `VPN_Connect_Setup.exe` von den [Releases](https://github.com/JonasHofer01/VPN-Connect/releases) herunter
 2. Doppelklick → UAC-Prompt bestätigen (Admin-Rechte nötig für WireGuard)
+3. Optional `VPN Connect starten` aktiviert lassen; die App wird nach der Installation erhöht gestartet
 
 > **Hinweis:** Falls Smart App Control aktiv ist, kann die EXE blockiert werden.
 > In dem Fall: Windows-Sicherheit → App- & Browsersteuerung → Smart App Control → **Aus**.
-> Alternativ den `VPN_Connect.vbs` Launcher nutzen (verwendet das signierte `pythonw.exe`).
 
-### Variante B: Python-Skript
+### Variante B: Portable EXE
+
+1. Lade `VPN_Connect.exe` aus den Releases herunter
+2. Doppelklick → UAC-Prompt bestätigen
+
+### Variante C: Python-Skript
 
 1. Python 3.12+ installieren
 2. `pip install PyQt6`
-3. `VPN_Connect.vbs` doppelklicken oder `pythonw.exe vpn_connect.py` ausführen
+3. `python vpn_connect.py` ausführen
 
 ## Entwicklung
 
@@ -53,11 +58,12 @@ python vpn_connect.py
 ## Projektstruktur
 
 ```
-vpn_connect.py      # Hauptprogramm (PyQt6 GUI)
-VPN_Connect.vbs     # Launcher (umgeht Smart App Control)
-build.ps1           # Build-Skript (erstellt EXE via PyInstaller)
-requirements.txt    # Python-Abhängigkeiten
-.github/workflows/  # CI/CD (GitHub Actions)
+vpn_connect.py              # Hauptprogramm (PyQt6 GUI)
+assets/app_icon.ico         # App-/Installer-Icon
+tools/generate_app_icon.py  # Icon-Generator
+build.ps1                   # Build-Skript (erstellt EXE + Installer)
+requirements.txt            # Python-Abhängigkeiten
+.github/workflows/          # CI/CD (GitHub Actions)
 ```
 
 ## Release erstellen

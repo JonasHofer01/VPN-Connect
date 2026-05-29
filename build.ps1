@@ -3,10 +3,25 @@
 
 Write-Host "=== VPN_Connect Build ===" -ForegroundColor Cyan
 
+$python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 $venv = Join-Path $PSScriptRoot ".venv\Scripts\pyinstaller.exe"
+$icon = Join-Path $PSScriptRoot "assets\app_icon.ico"
+$iconScript = Join-Path $PSScriptRoot "tools\generate_app_icon.py"
+
 if (-not (Test-Path $venv)) {
     Write-Host "FEHLER: PyInstaller nicht gefunden. Bitte zuerst: pip install pyinstaller" -ForegroundColor Red
     exit 1
+}
+
+if (-not (Test-Path $icon)) {
+    if ((Test-Path $python) -and (Test-Path $iconScript)) {
+        Write-Host "Erstelle App-Icon..." -ForegroundColor Cyan
+        & $python $iconScript
+    }
+    if (-not (Test-Path $icon)) {
+        Write-Host "FEHLER: App-Icon nicht gefunden: $icon" -ForegroundColor Red
+        exit 1
+    }
 }
 
 & $venv --noconfirm `
@@ -14,6 +29,7 @@ if (-not (Test-Path $venv)) {
     --windowed `
     --name VPN_Connect `
     --uac-admin `
+    --icon $icon `
     --runtime-tmpdir "C:\ProgramData\VPNConnect" `
     (Join-Path $PSScriptRoot "vpn_connect.py")
 
@@ -33,7 +49,7 @@ if ($LASTEXITCODE -eq 0) {
 
     if ($iscc) {
         Write-Host "`nErstelle Installer mit Inno Setup..." -ForegroundColor Cyan
-        & $iscc /DAppVersion="3.1.0" (Join-Path $PSScriptRoot "VPN_Connect.iss")
+        & $iscc /DAppVersion="3.1.1" (Join-Path $PSScriptRoot "VPN_Connect.iss")
         if ($LASTEXITCODE -eq 0) {
             $setupPath = Join-Path $PSScriptRoot "dist\VPN_Connect_Setup.exe"
             $setupSize = [math]::Round((Get-Item $setupPath).Length / 1MB, 1)

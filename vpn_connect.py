@@ -29,14 +29,17 @@ from PyQt6.QtWidgets import (
     QTabWidget, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QFont, QColor, QPainter, QAction, QPixmap, QIcon
+from PyQt6.QtGui import (
+    QFont, QColor, QPainter, QAction, QPixmap, QIcon,
+    QPen, QBrush, QLinearGradient,
+)
 from PyQt6.QtGui import QKeySequence, QShortcut
 
 # =============================================================================
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.1.1"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -188,12 +191,24 @@ def is_admin() -> bool:
         return False
 
 
-def run_as_admin() -> None:
-    args = []
-    for arg in sys.argv:
-        args.append(f'"{arg}"' if " " in arg else arg)
-    ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", sys.executable, " ".join(args), _base_dir, 1)
+def run_as_admin() -> bool:
+    if sys.platform != "win32":
+        return False
+    if getattr(sys, "frozen", False):
+        args = sys.argv[1:]
+    else:
+        args = [os.path.abspath(sys.argv[0]), *sys.argv[1:]]
+    try:
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", sys.executable, subprocess.list2cmdline(args),
+            _base_dir, 1)
+    except Exception as e:
+        log(f"Admin-Neustart fehlgeschlagen: {e}", "error")
+        return False
+    if result <= 32:
+        log(f"Admin-Neustart fehlgeschlagen (ShellExecuteW={result}).", "error")
+        return False
+    return True
 
 
 # =============================================================================
@@ -671,6 +686,12 @@ def _cleanup_temp_rdp():
         pass
 
 
+def _safe_rdp_filename(name: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in " ._-" else "_" for ch in name)
+    safe = safe.strip(" .")
+    return safe or "remote"
+
+
 def _cleanup():
     global _active_config
     if _active_config:
@@ -1030,6 +1051,95 @@ C = {
 }
 
 
+_APP_ICON_CACHE: Optional[QIcon] = None
+
+
+def _app_icon_path() -> str:
+    return os.path.join(_base_dir, "assets", "app_icon.ico")
+
+
+def _app_icon_paths() -> List[str]:
+    paths = [_app_icon_path()]
+    bundle_dir = getattr(sys, "_MEIPASS", "")
+    if bundle_dir:
+        paths.append(os.path.join(bundle_dir, "assets", "app_icon.ico"))
+    return paths
+
+
+def _render_app_icon_pixmap(size: int) -> QPixmap:
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.scale(size / 256, size / 256)
+
+    bg = QLinearGradient(0, 0, 256, 256)
+    bg.setColorAt(0.0, QColor("#102033"))
+    bg.setColorAt(0.55, QColor("#123b4a"))
+    bg.setColorAt(1.0, QColor("#0f766e"))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(bg))
+    p.drawRoundedRect(10, 10, 236, 236, 54, 54)
+
+    p.setBrush(QColor(34, 211, 238, 42))
+    p.drawEllipse(142, 24, 88, 88)
+    p.setBrush(QColor(52, 211, 153, 36))
+    p.drawEllipse(34, 150, 96, 96)
+
+    net_pen = QPen(QColor("#67e8f9"), 12)
+    net_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(net_pen)
+    p.drawLine(128, 128, 76, 178)
+    p.drawLine(128, 128, 180, 178)
+    p.drawLine(128, 128, 128, 74)
+
+    node_border = QPen(QColor("#0b1222"), 8)
+    p.setPen(node_border)
+    p.setBrush(QColor("#e5ecf5"))
+    p.drawEllipse(60, 162, 34, 34)
+    p.drawEllipse(162, 162, 34, 34)
+    p.drawEllipse(111, 57, 34, 34)
+
+    house_pen = QPen(QColor("#e5ecf5"), 14)
+    house_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    house_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(house_pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawLine(76, 126, 128, 78)
+    p.drawLine(128, 78, 180, 126)
+    p.drawRoundedRect(88, 116, 80, 62, 12, 12)
+
+    p.setPen(QPen(QColor("#0b1222"), 8))
+    p.setBrush(QColor("#34d399"))
+    p.drawEllipse(108, 108, 40, 40)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#e5ecf5"))
+    p.drawEllipse(121, 121, 14, 14)
+
+    p.end()
+    return px
+
+
+def get_app_icon() -> QIcon:
+    global _APP_ICON_CACHE
+    if _APP_ICON_CACHE is not None and not _APP_ICON_CACHE.isNull():
+        return _APP_ICON_CACHE
+
+    for icon_path in _app_icon_paths():
+        if os.path.exists(icon_path):
+            icon = QIcon(icon_path)
+            if not icon.isNull():
+                _APP_ICON_CACHE = icon
+                return icon
+
+    icon = QIcon()
+    for size in (16, 24, 32, 48, 64, 128, 256):
+        icon.addPixmap(_render_app_icon_pixmap(size))
+    _APP_ICON_CACHE = icon
+    return icon
+
+
 def _apply_accent_color(hex_code: str) -> None:
     color = QColor(hex_code)
     if not color.isValid():
@@ -1339,6 +1449,7 @@ def _make_btn(text: str, bg: str, fg: str, hover: str,
 class VPNApp(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setWindowIcon(get_app_icon())
         self.setWindowTitle(f"VPN Connect  v{APP_VERSION}")
         self.setMinimumSize(800, 520)
         self.resize(800, 560)
@@ -1839,31 +1950,60 @@ class VPNApp(QMainWindow):
                 border-radius: 8px;
             }}
         """)
-        rdp_layout = QHBoxLayout(rdp_card)
+        rdp_layout = QVBoxLayout(rdp_card)
         rdp_layout.setContentsMargins(16, 12, 16, 12)
-        rdp_layout.setSpacing(12)
+        rdp_layout.setSpacing(8)
 
-        rdp_layout.addWidget(QLabel("Auflösung"))
+        rdp_display_layout = QHBoxLayout()
+        rdp_display_layout.setSpacing(12)
+        rdp_display_layout.addWidget(QLabel("Auflösung"))
         self.cmb_rdp_res = QComboBox()
         self.cmb_rdp_res.addItem("Auto", None)
         for w, h in [(1920, 1080), (1600, 900), (1366, 768), (1280, 720)]:
             self.cmb_rdp_res.addItem(f"{w} x {h}", (w, h))
         self.cmb_rdp_res.currentIndexChanged.connect(lambda: self._schedule_save())
-        rdp_layout.addWidget(self.cmb_rdp_res)
+        rdp_display_layout.addWidget(self.cmb_rdp_res)
 
-        rdp_layout.addSpacing(16)
+        rdp_display_layout.addSpacing(16)
 
         self.chk_rdp_fullscreen = QCheckBox("Vollbild")
         self.chk_rdp_fullscreen.setStyleSheet(chk_qss)
         self.chk_rdp_fullscreen.stateChanged.connect(lambda: self._schedule_save())
-        rdp_layout.addWidget(self.chk_rdp_fullscreen)
+        rdp_display_layout.addWidget(self.chk_rdp_fullscreen)
 
         self.chk_rdp_multimon = QCheckBox("Alle Monitore")
         self.chk_rdp_multimon.setStyleSheet(chk_qss)
         self.chk_rdp_multimon.stateChanged.connect(lambda: self._schedule_save())
-        rdp_layout.addWidget(self.chk_rdp_multimon)
+        rdp_display_layout.addWidget(self.chk_rdp_multimon)
 
-        rdp_layout.addStretch()
+        rdp_display_layout.addStretch()
+        rdp_layout.addLayout(rdp_display_layout)
+
+        rdp_redirect_layout = QHBoxLayout()
+        rdp_redirect_layout.setSpacing(12)
+
+        self.chk_rdp_clipboard = QCheckBox("Zwischenablage")
+        self.chk_rdp_clipboard.setStyleSheet(chk_qss)
+        self.chk_rdp_clipboard.stateChanged.connect(lambda: self._schedule_save())
+        rdp_redirect_layout.addWidget(self.chk_rdp_clipboard)
+
+        self.chk_rdp_drives = QCheckBox("Lokale Laufwerke")
+        self.chk_rdp_drives.setStyleSheet(chk_qss)
+        self.chk_rdp_drives.stateChanged.connect(lambda: self._schedule_save())
+        rdp_redirect_layout.addWidget(self.chk_rdp_drives)
+
+        self.chk_rdp_windows_hello = QCheckBox("Windows Hello/Smartcard")
+        self.chk_rdp_windows_hello.setStyleSheet(chk_qss)
+        self.chk_rdp_windows_hello.stateChanged.connect(lambda: self._schedule_save())
+        rdp_redirect_layout.addWidget(self.chk_rdp_windows_hello)
+
+        self.chk_rdp_webauthn = QCheckBox("Passkeys/WebAuthn")
+        self.chk_rdp_webauthn.setStyleSheet(chk_qss)
+        self.chk_rdp_webauthn.stateChanged.connect(lambda: self._schedule_save())
+        rdp_redirect_layout.addWidget(self.chk_rdp_webauthn)
+
+        rdp_redirect_layout.addStretch()
+        rdp_layout.addLayout(rdp_redirect_layout)
         settings_layout.addWidget(rdp_card)
 
         # Design (Farbschema)
@@ -2562,6 +2702,10 @@ class VPNApp(QMainWindow):
                 "rdp_resolution": self.cmb_rdp_res.currentData(),
                 "rdp_fullscreen": self.chk_rdp_fullscreen.isChecked(),
                 "rdp_multimon": self.chk_rdp_multimon.isChecked(),
+                "rdp_clipboard": self.chk_rdp_clipboard.isChecked(),
+                "rdp_drives": self.chk_rdp_drives.isChecked(),
+                "rdp_windows_hello": self.chk_rdp_windows_hello.isChecked(),
+                "rdp_webauthn": self.chk_rdp_webauthn.isChecked(),
                 "split_excludes": self._split_excludes,
                 "schedule_enable": self._schedule_enable,
                 "schedule_connect": self._schedule_connect,
@@ -2666,6 +2810,10 @@ class VPNApp(QMainWindow):
                             break
                 self.chk_rdp_fullscreen.setChecked(d.get("rdp_fullscreen", False))
                 self.chk_rdp_multimon.setChecked(d.get("rdp_multimon", False))
+                self.chk_rdp_clipboard.setChecked(d.get("rdp_clipboard", False))
+                self.chk_rdp_drives.setChecked(d.get("rdp_drives", False))
+                self.chk_rdp_windows_hello.setChecked(d.get("rdp_windows_hello", False))
+                self.chk_rdp_webauthn.setChecked(d.get("rdp_webauthn", False))
                 self.btn_login.setEnabled(bool(TARGET_IP) and (self.upsnap is None))
 
                 self._split_excludes = d.get("split_excludes", [])
@@ -3183,6 +3331,68 @@ class VPNApp(QMainWindow):
         user, pw = self._ask_rdp_credentials(name)
         self._on_rdp(ip, name, btn_refs, status_lbl, username=user, password=pw)
 
+    def _rdp_redirections_requested(self) -> bool:
+        checks = (
+            "chk_rdp_clipboard",
+            "chk_rdp_drives",
+            "chk_rdp_windows_hello",
+            "chk_rdp_webauthn",
+        )
+        return any(
+            hasattr(self, attr) and getattr(self, attr).isChecked()
+            for attr in checks
+        )
+
+    def _build_mstsc_args(self, ip: str) -> List[str]:
+        args = ["mstsc.exe", f"/v:{ip}"]
+        if hasattr(self, 'chk_rdp_fullscreen') and self.chk_rdp_fullscreen.isChecked():
+            args.append("/f")
+        else:
+            res = self.cmb_rdp_res.currentData() if hasattr(self, "cmb_rdp_res") else None
+            if res:
+                w, h = res
+                args.extend([f"/w:{w}", f"/h:{h}"])
+        if hasattr(self, 'chk_rdp_multimon') and self.chk_rdp_multimon.isChecked():
+            args.append("/multimon")
+        return args
+
+    def _write_rdp_file(self, rdp_path: str, ip: str, username: Optional[str],
+                        password: Optional[str]) -> None:
+        with open(rdp_path, "w", encoding="utf-8") as f:
+            f.write(f"full address:s:{ip}\n")
+            f.write(f"prompt for credentials:i:{'0' if (username and password) else '1'}\n")
+            f.write("promptcredentialonce:i:1\n")
+            f.write("enablecredsspsupport:i:1\n")
+            f.write("authentication level:i:0\n")
+
+            if hasattr(self, 'chk_rdp_fullscreen') and self.chk_rdp_fullscreen.isChecked():
+                f.write("screen mode id:i:2\n")
+            else:
+                f.write("screen mode id:i:1\n")
+                res = self.cmb_rdp_res.currentData() if hasattr(self, "cmb_rdp_res") else None
+                if res:
+                    w, h = res
+                    f.write(f"desktopwidth:i:{w}\n")
+                    f.write(f"desktopheight:i:{h}\n")
+
+            if hasattr(self, 'chk_rdp_multimon') and self.chk_rdp_multimon.isChecked():
+                f.write("use multimon:i:1\n")
+
+            f.write("session bpp:i:32\n")
+            f.write(f"redirectclipboard:i:{1 if self.chk_rdp_clipboard.isChecked() else 0}\n")
+            f.write(f"drivestoredirect:s:{'*' if self.chk_rdp_drives.isChecked() else ''}\n")
+            f.write(f"redirectsmartcards:i:{1 if self.chk_rdp_windows_hello.isChecked() else 0}\n")
+            f.write(f"redirectwebauthn:i:{1 if self.chk_rdp_webauthn.isChecked() else 0}\n")
+            f.write("redirectprinters:i:0\n")
+            f.write("redirectcomports:i:0\n")
+            f.write("redirectlocation:i:0\n")
+            f.write("audiocapturemode:i:0\n")
+            f.write("camerastoredirect:s:\n")
+            f.write("devicestoredirect:s:\n")
+            f.write("usbdevicestoredirect:s:\n")
+            if username:
+                f.write(f"username:s:{username}\n")
+
     def _on_rdp(self, ip: str, name: str,
                 btn_refs: list = None, status_lbl: QLabel = None,
                 username: Optional[str] = None, password: Optional[str] = None):
@@ -3204,44 +3414,32 @@ class VPNApp(QMainWindow):
                 except Exception as e:
                     log(f"cmdkey Fehler: {e}", "warning")
 
-            rdp_path = os.path.join(
-                os.environ.get("TEMP", _base_dir), f"_vpn_{name}.rdp")
-            with open(rdp_path, "w") as f:
-                f.write(f"full address:s:{ip}\n")
-                # Kein Credential-Prompt wenn cmdkey gesetzt
-                f.write(f"prompt for credentials:i:{'0' if (username and password) else '1'}\n")
-                f.write("authentication level:i:0\n")
-                if hasattr(self, 'chk_rdp_fullscreen') and self.chk_rdp_fullscreen.isChecked():
-                    f.write("screen mode id:i:2\n")
-                else:
-                    f.write("screen mode id:i:1\n")
-                    res = self.cmb_rdp_res.currentData() if hasattr(self, "cmb_rdp_res") else None
-                    if res:
-                        w, h = res
-                        f.write(f"desktopwidth:i:{w}\n")
-                        f.write(f"desktopheight:i:{h}\n")
-
-                if hasattr(self, 'chk_rdp_multimon') and self.chk_rdp_multimon.isChecked():
-                    f.write("use multimon:i:1\n")
-
-                f.write("session bpp:i:32\n")
-                if username:
-                    f.write(f"username:s:{username}\n")
-            subprocess.Popen(["explorer.exe", rdp_path])
-            log(f"RDP gestartet: {rdp_path}")
+            rdp_path = None
+            if self._rdp_redirections_requested():
+                rdp_path = os.path.join(
+                    os.environ.get("TEMP", _base_dir),
+                    f"_vpn_{_safe_rdp_filename(name)}.rdp")
+                self._write_rdp_file(rdp_path, ip, username, password)
+                subprocess.Popen(["mstsc.exe", rdp_path])
+                log(f"RDP gestartet: {rdp_path}")
+            else:
+                args = self._build_mstsc_args(ip)
+                subprocess.Popen(args)
+                log(f"RDP gestartet: {' '.join(args)}")
             if status_lbl:
                 QTimer.singleShot(2000, lambda: self.sig.device_status_signal.emit(
                     status_lbl, "Online", C["green"]))
 
             def _del():
-                time.sleep(8)
-                try:
-                    os.remove(rdp_path)
-                    log(f"Temp-RDP gelöscht: {rdp_path}")
-                except OSError:
-                    pass
+                if rdp_path:
+                    time.sleep(8)
+                    try:
+                        os.remove(rdp_path)
+                        log(f"Temp-RDP gelöscht: {rdp_path}")
+                    except OSError:
+                        pass
                 # cmdkey-Eintrag nach 10s wieder entfernen
-                if username and password:
+                if creds_added:
                     time.sleep(2)
                     try:
                         _run_silent(["cmdkey", f"/delete:{ip}"],
@@ -3774,12 +3972,7 @@ class VPNApp(QMainWindow):
 
     def _setup_tray(self):
         """System-Tray-Icon mit Kontextmenü einrichten."""
-        # Einfaches Icon generieren (farbiges Quadrat)
-        px = QPixmap(64, 64)
-        px.fill(QColor(C["accent"]))
-        icon = QIcon(px)
-
-        self._tray = QSystemTrayIcon(icon, self)
+        self._tray = QSystemTrayIcon(get_app_icon(), self)
         self._tray.setToolTip("VPN Connect - Getrennt")
 
         menu = QMenu()
@@ -3900,7 +4093,15 @@ def main():
         pass
 
     if not is_admin():
-        run_as_admin()
+        if not run_as_admin():
+            try:
+                ctypes.windll.user32.MessageBoxW(
+                    None,
+                    "VPN Connect benoetigt Administratorrechte fuer WireGuard.",
+                    "VPN Connect",
+                    0x10)
+            except Exception:
+                pass
         sys.exit()
 
     # Systemweiter Mutex für Inno Setup Installer-Koordination
@@ -3912,6 +4113,7 @@ def main():
             pass
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(get_app_icon())
     app.setStyleSheet(get_global_qss())
     app.setStyle("Fusion")
 

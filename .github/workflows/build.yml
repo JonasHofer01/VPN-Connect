@@ -36,7 +36,7 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --onefile --windowed --name VPN_Connect --uac-admin vpn_connect.py
+          pyinstaller --onefile --windowed --name VPN_Connect --uac-admin --icon assets\app_icon.ico --runtime-tmpdir "C:\ProgramData\VPNConnect" vpn_connect.py
 
       - name: Build Installer (Inno Setup)
         run: |

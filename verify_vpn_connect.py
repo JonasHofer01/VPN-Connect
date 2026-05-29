@@ -259,6 +259,19 @@ class TestInstalledExePath(unittest.TestCase):
         self.assertEqual(vpn_connect._installed_exe_path(current), current)
 
 
+class TestRDPHelpers(unittest.TestCase):
+    """Verify RDP helper behavior used for generated profile files."""
+
+    def test_safe_rdp_filename_replaces_invalid_path_chars(self):
+        self.assertEqual(
+            vpn_connect._safe_rdp_filename('Home:Server/Office*PC?'),
+            "Home_Server_Office_PC_",
+        )
+
+    def test_safe_rdp_filename_fallback(self):
+        self.assertEqual(vpn_connect._safe_rdp_filename("..."), "remote")
+
+
 if __name__ == "__main__":
     # Initialize QApplication before tests (needed for PyQt6 imports in vpn_connect)
     qapp = QApplication.instance()
