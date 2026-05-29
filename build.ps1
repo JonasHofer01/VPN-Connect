@@ -23,6 +23,28 @@ if ($LASTEXITCODE -eq 0) {
     Copy-Item $src $dst -Force
     $size = [math]::Round((Get-Item $dst).Length / 1MB, 1)
     Write-Host "`nBuild erfolgreich! VPN_Connect.exe ($size MB)" -ForegroundColor Green
+
+    # Inno Setup Compiler (iscc.exe) suchen
+    $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+    if (-not (Test-Path $iscc)) {
+        # Fallback auf PATH-Suche
+        $iscc = Get-Command iscc -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+    }
+
+    if ($iscc) {
+        Write-Host "`nErstelle Installer mit Inno Setup..." -ForegroundColor Cyan
+        & $iscc /DAppVersion="3.1.0" (Join-Path $PSScriptRoot "VPN_Connect.iss")
+        if ($LASTEXITCODE -eq 0) {
+            $setupPath = Join-Path $PSScriptRoot "dist\VPN_Connect_Setup.exe"
+            $setupSize = [math]::Round((Get-Item $setupPath).Length / 1MB, 1)
+            Write-Host "Installer erfolgreich erstellt! dist\VPN_Connect_Setup.exe ($setupSize MB)" -ForegroundColor Green
+        } else {
+            Write-Host "Installer-Build fehlgeschlagen!" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "`nHINWEIS: Inno Setup (ISCC.exe) nicht gefunden. Installer-Build übersprungen." -ForegroundColor Yellow
+        Write-Host "Installieren Sie Inno Setup 6, um Installer-Builds lokal zu erstellen." -ForegroundColor Yellow
+    }
 } else {
     Write-Host "`nBuild fehlgeschlagen!" -ForegroundColor Red
 }

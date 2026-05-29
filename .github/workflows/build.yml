@@ -38,10 +38,16 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name VPN_Connect --uac-admin vpn_connect.py
 
+      - name: Build Installer (Inno Setup)
+        run: |
+          iscc /DAppVersion="${{ github.ref_name }}" VPN_Connect.iss
+
       - name: Generate SHA256
         run: |
-          $hash = (Get-FileHash -Algorithm SHA256 "dist\VPN_Connect.exe").Hash.ToLowerInvariant()
-          Set-Content -Path "dist\VPN_Connect.exe.sha256" -Value "$hash  VPN_Connect.exe" -Encoding ASCII
+          $hash_exe = (Get-FileHash -Algorithm SHA256 "dist\VPN_Connect.exe").Hash.ToLowerInvariant()
+          Set-Content -Path "dist\VPN_Connect.exe.sha256" -Value "$hash_exe  VPN_Connect.exe" -Encoding ASCII
+          $hash_setup = (Get-FileHash -Algorithm SHA256 "dist\VPN_Connect_Setup.exe").Hash.ToLowerInvariant()
+          Set-Content -Path "dist\VPN_Connect_Setup.exe.sha256" -Value "$hash_setup  VPN_Connect_Setup.exe" -Encoding ASCII
 
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
@@ -50,6 +56,8 @@ jobs:
           path: |
             dist/VPN_Connect.exe
             dist/VPN_Connect.exe.sha256
+            dist/VPN_Connect_Setup.exe
+            dist/VPN_Connect_Setup.exe.sha256
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -57,5 +65,7 @@ jobs:
           files: |
             dist/VPN_Connect.exe
             dist/VPN_Connect.exe.sha256
+            dist/VPN_Connect_Setup.exe
+            dist/VPN_Connect_Setup.exe.sha256
           generate_release_notes: true
 

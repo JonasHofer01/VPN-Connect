@@ -36,7 +36,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "3.0.1"
+APP_VERSION = "3.1.0"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -105,6 +105,8 @@ def _setup_logging():
 logger = _setup_logging()
 
 _app: Optional["VPNApp"] = None
+_mutex: Optional[object] = None
+
 
 
 def log(msg: str, level: str = "info") -> None:
@@ -713,8 +715,16 @@ def _select_update_assets(assets: list) -> Tuple[Optional[dict], Optional[dict]]
 
     exe_asset = next(
         (asset for asset in exe_assets
-         if str(asset.get("name", "")).lower() == "vpn_connect.exe"),
-        exe_assets[0],
+         if str(asset.get("name", "")).lower() == "vpn_connect_setup.exe"),
+        next(
+            (asset for asset in exe_assets
+             if "setup" in str(asset.get("name", "")).lower()),
+            next(
+                (asset for asset in exe_assets
+                 if str(asset.get("name", "")).lower() == "vpn_connect.exe"),
+                exe_assets[0]
+            )
+        )
     )
     exe_name = str(exe_asset.get("name", "")).lower()
     exe_stem = exe_name[:-4] if exe_name.endswith(".exe") else exe_name
@@ -878,6 +888,20 @@ def apply_update(new_exe: str, exit_app: bool = True) -> bool:
             log("Signaturprüfung erfolgreich.")
     except Exception as e:
         log(f"Signaturprüfung konnte nicht ausgeführt werden: {e}", "warning")
+
+    # Wenn der neue Dateiname auf einen Installer hindeutet, führen wir diesen silent aus.
+    is_installer = "setup" in os.path.basename(new_exe).lower()
+    if is_installer:
+        log("Installer erkannt – starte geräuschlose Installation...")
+        try:
+            subprocess.Popen([new_exe, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+            log("Installer gestartet, Anwendung wird beendet...")
+            if exit_app:
+                sys.exit(0)
+            return True
+        except Exception as e:
+            log(f"Installer-Start fehlgeschlagen: {e}", "error")
+            return False
 
     current = sys.executable
     target = _installed_exe_path(current)
@@ -3878,6 +3902,14 @@ def main():
     if not is_admin():
         run_as_admin()
         sys.exit()
+
+    # Systemweiter Mutex für Inno Setup Installer-Koordination
+    global _mutex
+    if sys.platform == "win32":
+        try:
+            _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\VPNConnectMutex")
+        except Exception:
+            pass
 
     app = QApplication(sys.argv)
     app.setStyleSheet(get_global_qss())

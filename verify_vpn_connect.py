@@ -217,6 +217,20 @@ class TestReleaseAssetSelection(unittest.TestCase):
         self.assertEqual(exe["name"], "VPN_Connect.exe")
         self.assertEqual(sha["name"], "VPN_Connect.exe.sha256")
 
+    def test_prefers_setup_installer(self):
+        assets = [
+            {"name": "notes.txt"},
+            {"name": "VPN_Connect.exe"},
+            {"name": "VPN_Connect.exe.sha256"},
+            {"name": "VPN_Connect_Setup.exe"},
+            {"name": "VPN_Connect_Setup.exe.sha256"},
+        ]
+
+        exe, sha = vpn_connect._select_update_assets(assets)
+
+        self.assertEqual(exe["name"], "VPN_Connect_Setup.exe")
+        self.assertEqual(sha["name"], "VPN_Connect_Setup.exe.sha256")
+
     def test_does_not_guess_when_multiple_unrelated_hashes_exist(self):
         assets = [
             {"name": "VPN_Connect.exe"},
