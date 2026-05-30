@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.1"
+APP_VERSION = "4.0.2"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -215,7 +215,30 @@ def run_as_admin() -> bool:
 #  HILFSFUNKTIONEN
 # =============================================================================
 
+def _resolve_executable(name: str) -> str:
+    """Sucht den Pfad zur Executable. Erweitert fuer WireGuard-Standardpfade."""
+    if not name:
+        return ""
+    if os.path.isabs(name):
+        return name
+    
+    found = shutil.which(name)
+    if found:
+        return found
+
+    # Spezifische Pfade fuer WireGuard, falls nicht im PATH
+    if name.lower() in ("wireguard", "wireguard.exe", "wg", "wg.exe"):
+        base = r"C:\Program Files\WireGuard"
+        ext = ".exe" if not name.lower().endswith(".exe") else ""
+        p = os.path.join(base, name + ext)
+        if os.path.exists(p):
+            return p
+    return name
+
+
 def _run_silent(cmd: list, **kw) -> subprocess.CompletedProcess:
+    if cmd:
+        cmd[0] = _resolve_executable(cmd[0])
     return subprocess.run(cmd, startupinfo=STARTUPINFO,
                           creationflags=CREATE_NO_WINDOW, **kw)
 
@@ -904,7 +927,8 @@ def apply_update(new_exe: str, exit_app: bool = True) -> bool:
     if is_installer:
         log("Installer erkannt – starte geräuschlose Installation...")
         try:
-            subprocess.Popen([new_exe, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+            abs_exe = os.path.abspath(new_exe)
+            subprocess.Popen([abs_exe, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
             log("Installer gestartet, Anwendung wird beendet...")
             if exit_app:
                 sys.exit(0)
@@ -975,8 +999,11 @@ Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
         with open(updater_ps1, "w", encoding="utf-8") as f:
             f.write(script)
         log(f"Updater-Skript geschrieben: {updater_ps1}")
+
+        ps_exe = _resolve_executable("powershell.exe")
+
         # Start PowerShell Helper im Hintergrund
-        subprocess.Popen(["powershell", "-ExecutionPolicy", "Bypass",
+        subprocess.Popen([ps_exe, "-ExecutionPolicy", "Bypass",
                           "-File", updater_ps1],
                          creationflags=CREATE_NO_WINDOW)
         log("Updater gestartet, Anwendung wird beendet...")
