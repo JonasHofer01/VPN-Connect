@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "3.1.1"
+APP_VERSION = "4.0.0"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -1855,64 +1855,17 @@ class VPNApp(QMainWindow):
         main_tab_layout.addStretch()
 
         # Einstellungen-Tab
-        settings_tab = QWidget()
-        settings_layout = QVBoxLayout(settings_tab)
-        settings_layout.setContentsMargins(12, 8, 12, 12)
-        settings_layout.setSpacing(4)
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        settings_content = QWidget()
+        settings_content.setStyleSheet(f"background-color: {C['bg']};")
+        settings_scroll.setWidget(settings_content)
+        settings_layout = QVBoxLayout(settings_content)
+        settings_layout.setContentsMargins(12, 12, 12, 12)
+        settings_layout.setSpacing(10)
 
-        # Server / Ziel
-        settings_layout.addWidget(self._section_label("Server / Ziel"))
-        srv_card = QFrame()
-        srv_card.setStyleSheet(f"""
-            QFrame {{
-                background-color: {C['card']};
-                border: 1px solid {C['border']};
-                border-radius: 8px;
-            }}
-        """)
-        srv_layout = QHBoxLayout(srv_card)
-        srv_layout.setContentsMargins(16, 12, 16, 12)
-        srv_layout.setSpacing(10)
-
-        lbl_ip = QLabel("IP / Hostname")
-        lbl_ip.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
-        srv_layout.addWidget(lbl_ip)
-
-        self.entry_target_ip = QLineEdit()
-        self.entry_target_ip.setPlaceholderText("z. B. 192.168.1.10")
-        self.entry_target_ip.setFixedWidth(190)
-        self.entry_target_ip.editingFinished.connect(self._apply_server_settings)
-        srv_layout.addWidget(self.entry_target_ip)
-
-        srv_layout.addSpacing(12)
-
-        lbl_port = QLabel("Port")
-        lbl_port.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
-        srv_layout.addWidget(lbl_port)
-
-        self.entry_target_port = QLineEdit()
-        self.entry_target_port.setPlaceholderText("8090")
-        self.entry_target_port.setFixedWidth(72)
-        self.entry_target_port.editingFinished.connect(self._apply_server_settings)
-        srv_layout.addWidget(self.entry_target_port)
-
-        srv_layout.addStretch()
-        settings_layout.addWidget(srv_card)
-
-        # Verbindung / Verhalten
-        settings_layout.addWidget(self._section_label("Verbindung"))
-        conn_card = QFrame()
-        conn_card.setStyleSheet(f"""
-            QFrame {{
-                background-color: {C['card']};
-                border: 1px solid {C['border']};
-                border-radius: 8px;
-            }}
-        """)
-        conn_layout = QVBoxLayout(conn_card)
-        conn_layout.setContentsMargins(16, 12, 16, 12)
-        conn_layout.setSpacing(8)
-
+        # Styles für Checkboxen
         chk_qss = f"""
             QCheckBox {{ color: {C['dim']}; font-size: 9pt; spacing: 8px; }}
             QCheckBox::indicator {{
@@ -1927,311 +1880,218 @@ class VPNApp(QMainWindow):
             }}
         """
 
+        # ── Gruppe 1: Netzwerk 🌐 ──────────────────────────────────────────
+        net_body, net_vbox = self._collapsible_group("Netzwerk", "🌐")
+        settings_layout.addWidget(net_body)
+
+        # Server / Ziel
+        net_vbox.addWidget(self._sub_section_label("Server / Ziel"))
+        srv_row = QHBoxLayout()
+        srv_row.setSpacing(8)
+        srv_row.addWidget(QLabel("IP / Hostname"))
+        self.entry_target_ip = QLineEdit()
+        self.entry_target_ip.setPlaceholderText("z. B. 192.168.1.10")
+        self.entry_target_ip.editingFinished.connect(self._apply_server_settings)
+        srv_row.addWidget(self.entry_target_ip)
+        srv_row.addWidget(QLabel("Port"))
+        self.entry_target_port = QLineEdit()
+        self.entry_target_port.setFixedWidth(60)
+        self.entry_target_port.editingFinished.connect(self._apply_server_settings)
+        srv_row.addWidget(self.entry_target_port)
+        net_vbox.addLayout(srv_row)
+
+        net_vbox.addWidget(self._hline())
+
+        # Verbindung
+        net_vbox.addWidget(self._sub_section_label("Verbindung"))
         self.chk_auto_reconnect = QCheckBox("Auto-Reconnect bei Verbindungsverlust")
         self.chk_auto_reconnect.setStyleSheet(chk_qss)
         self.chk_auto_reconnect.stateChanged.connect(lambda: self._schedule_save())
-        conn_layout.addWidget(self.chk_auto_reconnect)
+        net_vbox.addWidget(self.chk_auto_reconnect)
 
         self.chk_auto_connect = QCheckBox("Automatisch verbinden beim Start")
         self.chk_auto_connect.setStyleSheet(chk_qss)
         self.chk_auto_connect.stateChanged.connect(lambda: self._schedule_save())
-        conn_layout.addWidget(self.chk_auto_connect)
+        net_vbox.addWidget(self.chk_auto_connect)
 
-        conn_layout.addStretch()
-        settings_layout.addWidget(conn_card)
+        net_vbox.addWidget(self._hline())
 
-        # RDP Auflösung
-        settings_layout.addWidget(self._section_label("RDP-Einstellungen"))
-        rdp_card = QFrame()
-        rdp_card.setStyleSheet(f"""
-            QFrame {{
-                background-color: {C['card']};
-                border: 1px solid {C['border']};
-                border-radius: 8px;
-            }}
-        """)
-        rdp_layout = QVBoxLayout(rdp_card)
-        rdp_layout.setContentsMargins(16, 12, 16, 12)
-        rdp_layout.setSpacing(8)
+        # Split-Tunnel
+        net_vbox.addWidget(self._sub_section_label("Split-Tunnel (Bypass)"))
+        split_info = QLabel("CIDR/IP/Domain pro Zeile, wird vom VPN ausgenommen.")
+        split_info.setStyleSheet(f"color: {C['dim']}; font-size: 8pt;")
+        net_vbox.addWidget(split_info)
+        self.split_text = QTextEdit()
+        self.split_text.setPlaceholderText("192.168.100.0/24\nexample.com")
+        self.split_text.setFixedHeight(80)
+        self.split_text.textChanged.connect(self._on_split_changed)
+        net_vbox.addWidget(self.split_text)
 
-        rdp_display_layout = QHBoxLayout()
-        rdp_display_layout.setSpacing(12)
-        rdp_display_layout.addWidget(QLabel("Auflösung"))
+        net_vbox.addWidget(self._hline())
+
+        # HTTP-Check
+        net_vbox.addWidget(self._sub_section_label("HTTP Check"))
+        http_row = QHBoxLayout()
+        http_row.addWidget(QLabel("Überwachungs-URL"))
+        self.entry_http = QLineEdit()
+        self.entry_http.setPlaceholderText("https://example.com/health")
+        self.entry_http.editingFinished.connect(self._on_http_changed)
+        http_row.addWidget(self.entry_http)
+        net_vbox.addLayout(http_row)
+
+        # ── Gruppe 2: Remote Desktop 🖥️ ─────────────────────────────────────
+        rdp_body, rdp_vbox = self._collapsible_group("Remote Desktop", "🖥️")
+        settings_layout.addWidget(rdp_body)
+
+        rdp_vbox.addWidget(self._sub_section_label("Anzeige"))
+        rdp_disp = QHBoxLayout()
+        rdp_disp.addWidget(QLabel("Auflösung"))
         self.cmb_rdp_res = QComboBox()
         self.cmb_rdp_res.addItem("Auto", None)
         for w, h in [(1920, 1080), (1600, 900), (1366, 768), (1280, 720)]:
             self.cmb_rdp_res.addItem(f"{w} x {h}", (w, h))
         self.cmb_rdp_res.currentIndexChanged.connect(lambda: self._schedule_save())
-        rdp_display_layout.addWidget(self.cmb_rdp_res)
-
-        rdp_display_layout.addSpacing(16)
-
+        rdp_disp.addWidget(self.cmb_rdp_res)
+        rdp_disp.addSpacing(10)
         self.chk_rdp_fullscreen = QCheckBox("Vollbild")
         self.chk_rdp_fullscreen.setStyleSheet(chk_qss)
         self.chk_rdp_fullscreen.stateChanged.connect(lambda: self._schedule_save())
-        rdp_display_layout.addWidget(self.chk_rdp_fullscreen)
-
+        rdp_disp.addWidget(self.chk_rdp_fullscreen)
         self.chk_rdp_multimon = QCheckBox("Alle Monitore")
         self.chk_rdp_multimon.setStyleSheet(chk_qss)
         self.chk_rdp_multimon.stateChanged.connect(lambda: self._schedule_save())
-        rdp_display_layout.addWidget(self.chk_rdp_multimon)
+        rdp_disp.addWidget(self.chk_rdp_multimon)
+        rdp_disp.addStretch()
+        rdp_vbox.addLayout(rdp_disp)
 
-        rdp_display_layout.addStretch()
-        rdp_layout.addLayout(rdp_display_layout)
+        rdp_vbox.addWidget(self._hline())
 
-        rdp_redirect_layout = QHBoxLayout()
-        rdp_redirect_layout.setSpacing(12)
-
+        rdp_vbox.addWidget(self._sub_section_label("Weiterleitung & Sicherheit"))
+        rdp_grid = QGridLayout()
+        rdp_grid.setSpacing(10)
         self.chk_rdp_clipboard = QCheckBox("Zwischenablage")
         self.chk_rdp_clipboard.setStyleSheet(chk_qss)
         self.chk_rdp_clipboard.stateChanged.connect(lambda: self._schedule_save())
-        rdp_redirect_layout.addWidget(self.chk_rdp_clipboard)
-
+        rdp_grid.addWidget(self.chk_rdp_clipboard, 0, 0)
         self.chk_rdp_drives = QCheckBox("Lokale Laufwerke")
         self.chk_rdp_drives.setStyleSheet(chk_qss)
         self.chk_rdp_drives.stateChanged.connect(lambda: self._schedule_save())
-        rdp_redirect_layout.addWidget(self.chk_rdp_drives)
-
-        self.chk_rdp_windows_hello = QCheckBox("Windows Hello/Smartcard")
+        rdp_grid.addWidget(self.chk_rdp_drives, 0, 1)
+        self.chk_rdp_windows_hello = QCheckBox("Windows Hello / Smartcard")
         self.chk_rdp_windows_hello.setStyleSheet(chk_qss)
         self.chk_rdp_windows_hello.stateChanged.connect(lambda: self._schedule_save())
-        rdp_redirect_layout.addWidget(self.chk_rdp_windows_hello)
-
-        self.chk_rdp_webauthn = QCheckBox("Passkeys/WebAuthn")
+        rdp_grid.addWidget(self.chk_rdp_windows_hello, 1, 0)
+        self.chk_rdp_webauthn = QCheckBox("Passkeys / WebAuthn")
         self.chk_rdp_webauthn.setStyleSheet(chk_qss)
         self.chk_rdp_webauthn.stateChanged.connect(lambda: self._schedule_save())
-        rdp_redirect_layout.addWidget(self.chk_rdp_webauthn)
+        rdp_grid.addWidget(self.chk_rdp_webauthn, 1, 1)
+        rdp_vbox.addLayout(rdp_grid)
 
-        rdp_redirect_layout.addStretch()
-        rdp_layout.addLayout(rdp_redirect_layout)
-        settings_layout.addWidget(rdp_card)
+        # ── Gruppe 3: Zeitplan & Limits ⏱️ ───────────────────────────────────
+        sched_body, sched_vbox = self._collapsible_group("Zeitplan & Limits", "⏱️")
+        settings_layout.addWidget(sched_body)
 
-        # Design (Farbschema)
-        settings_layout.addWidget(self._section_label("Design"))
-        color_card = QFrame()
-        color_card.setStyleSheet(f"""
-            QFrame {{
-                background-color: {C['card']};
-                border: 1px solid {C['border']};
-                border-radius: 8px;
-            }}
-        """)
-        color_layout = QHBoxLayout(color_card)
-        color_layout.setContentsMargins(16, 12, 16, 12)
-        color_layout.setSpacing(12)
+        sched_vbox.addWidget(self._sub_section_label("Automatisierung"))
+        self.chk_schedule = QCheckBox("Zeitplan aktivieren")
+        self.chk_schedule.setStyleSheet(chk_qss)
+        self.chk_schedule.stateChanged.connect(lambda: self._schedule_save())
+        sched_vbox.addWidget(self.chk_schedule)
 
-        color_layout.addWidget(QLabel("Akzentfarbe (erfordert Neustart):"))
+        sched_row = QHBoxLayout()
+        sched_row.addWidget(QLabel("Verbinden um"))
+        self.entry_sched_connect = QLineEdit()
+        self.entry_sched_connect.setPlaceholderText("08:00")
+        self.entry_sched_connect.setFixedWidth(60)
+        self.entry_sched_connect.editingFinished.connect(self._schedule_save)
+        sched_row.addWidget(self.entry_sched_connect)
+        sched_row.addSpacing(20)
+        sched_row.addWidget(QLabel("Trennen um"))
+        self.entry_sched_disconnect = QLineEdit()
+        self.entry_sched_disconnect.setPlaceholderText("18:00")
+        self.entry_sched_disconnect.setFixedWidth(60)
+        self.entry_sched_disconnect.editingFinished.connect(self._schedule_save)
+        sched_row.addWidget(self.entry_sched_disconnect)
+        sched_row.addStretch()
+        sched_vbox.addLayout(sched_row)
 
+        sched_vbox.addWidget(self._hline())
+
+        sched_vbox.addWidget(self._sub_section_label("Datenvolumen"))
+        bw_row = QHBoxLayout()
+        bw_row.addWidget(QLabel("Warnung bei über"))
+        self.entry_bw = QLineEdit()
+        self.entry_bw.setFixedWidth(80)
+        self.entry_bw.editingFinished.connect(self._on_bw_changed)
+        bw_row.addWidget(self.entry_bw)
+        bw_row.addWidget(QLabel("MB pro Session"))
+        bw_row.addStretch()
+        sched_vbox.addLayout(bw_row)
+
+        # ── Gruppe 4: Darstellung & Debug 🎨 ────────────────────────────────
+        debug_body, debug_vbox = self._collapsible_group("Darstellung & Debug", "🎨")
+        settings_layout.addWidget(debug_body)
+
+        debug_vbox.addWidget(self._sub_section_label("Aussehen"))
+        color_row = QHBoxLayout()
+        color_row.addWidget(QLabel("Akzentfarbe"))
         self.color_group = []
-        colors = [
-            ("#22d3ee", "Cyan"),
-            ("#34d399", "Grün"),
-            ("#f43f5e", "Rot"),
-            ("#fbbf24", "Gelb"),
-            ("#a855f7", "Violett")
-        ]
-
+        colors = [("#22d3ee", "C"), ("#34d399", "G"), ("#f43f5e", "R"), ("#fbbf24", "Y"), ("#a855f7", "V")]
         for hex_code, name in colors:
             btn = QPushButton(name)
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {C['surface']};
-                    border: 2px solid {hex_code};
-                    color: {hex_code};
-                    border-radius: 4px;
-                    padding: 4px 12px;
-                }}
-                QPushButton:hover {{
-                    background-color: {hex_code};
-                    color: #fff;
-                }}
-                QPushButton:checked {{
-                    background-color: {hex_code};
-                    color: #000;
-                    font-weight: bold;
-                }}
-            """)
+            btn.setFixedSize(30, 30)
             btn.setCheckable(True)
+            btn.setStyleSheet(f"QPushButton {{ background: {hex_code}; border-radius: 15px; border: 2px solid transparent; font-size: 8pt; color: #000; font-weight: bold; }} QPushButton:checked {{ border: 2px solid white; }}")
             btn.clicked.connect(lambda checked, h=hex_code, b=btn: self._on_color_selected(h, b))
             self.color_group.append((hex_code, btn))
-            color_layout.addWidget(btn)
+            color_row.addWidget(btn)
+        color_row.addStretch()
+        debug_vbox.addLayout(color_row)
 
-        color_layout.addStretch()
-        settings_layout.addWidget(color_card)
+        debug_vbox.addWidget(self._hline())
 
-        # Log (Protokoll)
+        debug_vbox.addWidget(self._sub_section_label("Wartung & Support"))
+        support_btn = _make_btn("  Logs exportieren (ZIP)", C["surface"], C["fg"], C["surface_h"])
+        support_btn.clicked.connect(self._export_support)
+        debug_vbox.addWidget(support_btn)
+
+        debug_vbox.addWidget(self._hline())
+
+        # Protokolle (integrierte Expander)
+        debug_vbox.addWidget(self._sub_section_label("Protokolle"))
+        
         self.log_toggle = QPushButton("›  Protokoll")
         self.log_toggle.setStyleSheet(self._expander_btn_qss())
         self.log_toggle.clicked.connect(self._toggle_log)
-        settings_layout.addWidget(self.log_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
-
+        debug_vbox.addWidget(self.log_toggle)
         self.log_frame = QFrame()
-        self.log_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {C['card']};
-                border: 1px solid {C['border']};
-                border-radius: 6px;
-            }}
-        """)
-        log_layout = QVBoxLayout(self.log_frame)
-        log_layout.setContentsMargins(10, 10, 10, 10)
-
+        self.log_vbox = QVBoxLayout(self.log_frame)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setFont(QFont("Cascadia Code", 9))
-        self.log_text.setMaximumHeight(220)
-        log_layout.addWidget(self.log_text)
-
+        self.log_text.setFixedHeight(120)
+        self.log_vbox.addWidget(self.log_text)
         self.log_frame.hide()
-        settings_layout.addWidget(self.log_frame)
-        settings_layout.addSpacing(6)
+        debug_vbox.addWidget(self.log_frame)
 
-        # Verbindungshistorie
         self.history_toggle = QPushButton("›  Verbindungshistorie")
         self.history_toggle.setStyleSheet(self._expander_btn_qss())
         self.history_toggle.clicked.connect(self._toggle_history)
-        settings_layout.addWidget(self.history_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
-
+        debug_vbox.addWidget(self.history_toggle)
         self.history_frame = QFrame()
-        self.history_frame.setStyleSheet(f"""
-            QFrame {{
-                background-color: {C['card']};
-                border: 1px solid {C['border']};
-                border-radius: 6px;
-            }}
-        """)
-        hist_layout = QVBoxLayout(self.history_frame)
-        hist_layout.setContentsMargins(10, 10, 10, 10)
-        hist_layout.setSpacing(4)
+        self.hist_vbox = QVBoxLayout(self.history_frame)
         self.history_list_widget = QWidget()
         self.history_list_layout = QVBoxLayout(self.history_list_widget)
-        self.history_list_layout.setContentsMargins(0, 0, 0, 0)
-        self.history_list_layout.setSpacing(2)
-        hist_layout.addWidget(self.history_list_widget)
+        self.hist_vbox.addWidget(self.history_list_widget)
         btn_clear_hist = QPushButton("Verlauf leeren")
-        btn_clear_hist.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {C['dim']};
-                border: none; font-size: 8pt; padding: 2px;
-                text-align: right;
-            }}
-            QPushButton:hover {{ color: {C['red']}; }}
-        """)
+        btn_clear_hist.setStyleSheet(f"QPushButton {{ background: transparent; color: {C['red']}; border: none; text-align: right; }}")
         btn_clear_hist.clicked.connect(self._clear_history)
-        hist_layout.addWidget(btn_clear_hist, alignment=Qt.AlignmentFlag.AlignRight)
+        self.hist_vbox.addWidget(btn_clear_hist)
         self.history_frame.hide()
-        settings_layout.addWidget(self.history_frame)
-
-        # Split-Tunnel
-        settings_layout.addWidget(self._section_label("Split-Tunnel (Bypass)"))
-        split_card = QFrame()
-        split_card.setStyleSheet(f"""
-            QFrame {{
-                background-color: {C['card']};
-                border: 1px solid {C['border']};
-                border-radius: 8px;
-            }}
-        """)
-        split_layout = QVBoxLayout(split_card)
-        split_layout.setContentsMargins(16, 12, 16, 12)
-        split_layout.setSpacing(8)
-        split_info = QLabel("CIDR/IP/Domain pro Zeile, wird vom VPN ausgenommen (Route via Standard-Gateway).")
-        split_info.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
-        split_layout.addWidget(split_info)
-        self.split_text = QTextEdit()
-        self.split_text.setPlaceholderText("z.B.\n192.168.100.0/24\n10.0.0.5\nexample.com")
-        self.split_text.setFixedHeight(100)
-        self.split_text.textChanged.connect(self._on_split_changed)
-        split_layout.addWidget(self.split_text)
-        settings_layout.addWidget(split_card)
-
-        # Zeitplan
-        settings_layout.addWidget(self._section_label("Zeitplan Auto-Connect"))
-        sched_card = QFrame()
-        sched_card.setStyleSheet(f"""
-            QFrame {{
-                background-color: {C['card']};
-                border: 1px solid {C['border']};
-                border-radius: 8px;
-            }}
-        """)
-        sched_layout = QHBoxLayout(sched_card)
-        sched_layout.setContentsMargins(16, 12, 16, 12)
-        sched_layout.setSpacing(10)
-        self.chk_schedule = QCheckBox("Zeitplan aktivieren")
-        self.chk_schedule.stateChanged.connect(lambda: self._schedule_save())
-        sched_layout.addWidget(self.chk_schedule)
-        sched_layout.addSpacing(8)
-        sched_layout.addWidget(QLabel("Verbinden um"))
-        self.entry_sched_connect = QLineEdit()
-        self.entry_sched_connect.setPlaceholderText("08:00")
-        self.entry_sched_connect.setFixedWidth(70)
-        self.entry_sched_connect.editingFinished.connect(self._schedule_save)
-        sched_layout.addWidget(self.entry_sched_connect)
-        sched_layout.addSpacing(8)
-        sched_layout.addWidget(QLabel("Trennen um"))
-        self.entry_sched_disconnect = QLineEdit()
-        self.entry_sched_disconnect.setPlaceholderText("18:00")
-        self.entry_sched_disconnect.setFixedWidth(70)
-        self.entry_sched_disconnect.editingFinished.connect(self._schedule_save)
-        sched_layout.addWidget(self.entry_sched_disconnect)
-        sched_layout.addStretch()
-        settings_layout.addWidget(sched_card)
-
-        # Bandbreiten-Warnung
-        settings_layout.addWidget(self._section_label("Datenvolumen / Warnung"))
-        bw_card = QFrame()
-        bw_card.setStyleSheet(f"""
-            QFrame {{
-                background-color: {C['card']};
-                border: 1px solid {C['border']};
-                border-radius: 8px;
-            }}
-        """)
-        bw_layout = QHBoxLayout(bw_card)
-        bw_layout.setContentsMargins(16, 12, 16, 12)
-        bw_layout.setSpacing(10)
-        bw_layout.addWidget(QLabel("Warnen bei über"))
-        self.entry_bw = QLineEdit()
-        self.entry_bw.setPlaceholderText("500")  # MB
-        self.entry_bw.setFixedWidth(80)
-        self.entry_bw.editingFinished.connect(self._on_bw_changed)
-        bw_layout.addWidget(self.entry_bw)
-        bw_layout.addWidget(QLabel("MB (Session)"))
-        bw_layout.addStretch()
-        settings_layout.addWidget(bw_card)
-
-        # HTTP-Check
-        settings_layout.addWidget(self._section_label("HTTP Check"))
-        http_card = QFrame()
-        http_card.setStyleSheet(f"""
-            QFrame {{
-                background-color: {C['card']};
-                border: 1px solid {C['border']};
-                border-radius: 8px;
-            }}
-        """)
-        http_layout = QHBoxLayout(http_card)
-        http_layout.setContentsMargins(16, 12, 16, 12)
-        http_layout.setSpacing(10)
-        http_layout.addWidget(QLabel("URL"))
-        self.entry_http = QLineEdit()
-        self.entry_http.setPlaceholderText("https://example.com/health")
-        self.entry_http.setFixedWidth(280)
-        self.entry_http.editingFinished.connect(self._on_http_changed)
-        http_layout.addWidget(self.entry_http)
-        http_layout.addStretch()
-        settings_layout.addWidget(http_card)
-
-        # Support-Paket
-        support_btn = _make_btn("  Logs exportieren (ZIP)", C["surface"], C["fg"], C["surface_h"])
-        support_btn.clicked.connect(self._export_support)
-        settings_layout.addWidget(support_btn)
+        debug_vbox.addWidget(self.history_frame)
 
         settings_layout.addStretch()
 
         tabs.addTab(main_tab, "Haupt")
-        tabs.addTab(settings_tab, "Einstellungen")
+        tabs.addTab(settings_scroll, "Einstellungen")
 
         # ── Tastaturkürzel ──
         QShortcut(QKeySequence("Ctrl+K"), self).activated.connect(
@@ -2251,6 +2111,47 @@ class VPNApp(QMainWindow):
         lbl.setStyleSheet(f"color: {C['dim']}; letter-spacing: 0.3px; padding: 2px 0 0 0; margin: 0;")
         lbl.setContentsMargins(0, 2, 0, 0)
         return lbl
+
+    @staticmethod
+    def _sub_section_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color: {C['accent']}; font-size: 8.5pt; font-weight: 600; text-transform: uppercase;")
+        return lbl
+
+    @staticmethod
+    def _hline() -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet(f"background-color: {C['border']}; border: none; height: 1px; margin: 4px 0;")
+        return line
+
+    def _collapsible_group(self, title: str, icon: str) -> tuple[QWidget, QVBoxLayout]:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QPushButton(f"{icon}  {title}")
+        header.setCheckable(True)
+        header.setChecked(True)
+        header.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {C['surface']}; color: {C['fg']}; border: 1px solid {C['border']};
+                border-radius: 6px; padding: 10px 15px; text-align: left; font-weight: bold; font-size: 10pt;
+            }}
+            QPushButton:hover {{ background-color: {C['surface_h']}; }}
+        """)
+
+        body = QFrame()
+        body.setStyleSheet(f"QFrame {{ background: {C['card']}; border: 1px solid {C['border']}; border-top: none; border-bottom-left-radius: 8px; border-bottom-right-radius: 8px; }}")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(16, 12, 16, 12)
+        body_layout.setSpacing(12)
+
+        header.clicked.connect(lambda: body.setVisible(not body.isVisible()))
+        layout.addWidget(header)
+        layout.addWidget(body)
+        return container, body_layout
 
     def _on_color_selected(self, hex_code: str, btn: QPushButton):
         for h, b in self.color_group:
@@ -4125,4 +4026,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
