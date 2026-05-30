@@ -49,7 +49,7 @@ if ($LASTEXITCODE -eq 0) {
 
     if ($iscc) {
         Write-Host "`nErstelle Installer mit Inno Setup..." -ForegroundColor Cyan
-        & $iscc /DAppVersion="4.0.5" (Join-Path $PSScriptRoot "VPN_Connect.iss")
+        & $iscc /DAppVersion="4.0.6" (Join-Path $PSScriptRoot "VPN_Connect.iss")
         if ($LASTEXITCODE -eq 0) {
             $setupPath = Join-Path $PSScriptRoot "dist\VPN_Connect_Setup.exe"
             $setupSize = [math]::Round((Get-Item $setupPath).Length / 1MB, 1)

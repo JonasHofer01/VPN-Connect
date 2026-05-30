@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QListWidget, QFrame,
     QScrollArea, QTextEdit, QMessageBox, QSystemTrayIcon, QMenu,
     QCheckBox, QDialog, QFormLayout, QDialogButtonBox, QComboBox,
-    QTabWidget, QSizePolicy,
+    QTabWidget, QSizePolicy, QGridLayout,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import (
@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.5"
+APP_VERSION = "4.0.6"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
