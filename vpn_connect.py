@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.0.1"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -898,17 +898,6 @@ def apply_update(new_exe: str, exit_app: bool = True) -> bool:
     if not os.path.exists(new_exe):
         log(f"Update-Datei fehlt: {new_exe}", "error")
         return False
-
-    # Signatur prüfen (Best Effort / Warnung)
-    try:
-        r = _run_silent(["signtool", "verify", "/pa", new_exe],
-                        capture_output=True, text=True, timeout=15)
-        if r.returncode != 0:
-            log(f"Signaturprüfung fehlgeschlagen (rc={r.returncode}): {r.stdout or r.stderr}", "warning")
-        else:
-            log("Signaturprüfung erfolgreich.")
-    except Exception as e:
-        log(f"Signaturprüfung konnte nicht ausgeführt werden: {e}", "warning")
 
     # Wenn der neue Dateiname auf einen Installer hindeutet, führen wir diesen silent aus.
     is_installer = "setup" in os.path.basename(new_exe).lower()
