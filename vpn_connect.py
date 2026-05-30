@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.2"
+APP_VERSION = "4.0.3"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -216,21 +216,31 @@ def run_as_admin() -> bool:
 # =============================================================================
 
 def _resolve_executable(name: str) -> str:
-    """Sucht den Pfad zur Executable. Erweitert fuer WireGuard-Standardpfade."""
+    """Sucht den Pfad zur Executable. Erweitert fuer System- und WireGuard-Standardpfade."""
     if not name:
         return ""
     if os.path.isabs(name):
         return name
     
+    # 1. Standard-Suche via PATH
     found = shutil.which(name)
     if found:
         return found
 
-    # Spezifische Pfade fuer WireGuard, falls nicht im PATH
-    if name.lower() in ("wireguard", "wireguard.exe", "wg", "wg.exe"):
-        base = r"C:\Program Files\WireGuard"
-        ext = ".exe" if not name.lower().endswith(".exe") else ""
-        p = os.path.join(base, name + ext)
+    # 2. Bekannte System-Verzeichnisse als Fallback durchsuchen
+    sys_root = os.environ.get("SystemRoot", "C:\\Windows")
+    search_dirs = [
+        os.path.join(sys_root, "System32"),
+        os.path.join(sys_root, "System32", "WindowsPowerShell", "v1.0"),
+        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "WireGuard"),
+    ]
+    
+    stem = name.lower()
+    if not stem.endswith(".exe"):
+        stem += ".exe"
+
+    for d in search_dirs:
+        p = os.path.join(d, stem)
         if os.path.exists(p):
             return p
     return name
