@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.6"
+APP_VERSION = "4.0.7"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -941,10 +941,24 @@ def apply_update(new_exe: str, exit_app: bool = True) -> bool:
     is_installer = "setup" in os.path.basename(new_exe).lower()
     if is_installer:
         log("Installer erkannt – starte geräuschlose Installation...")
+        pid = os.getpid()
+        temp_dir = os.environ.get("TEMP", _base_dir)
+        installer_ps1 = os.path.join(temp_dir, "_vpn_installer.ps1")
+        script = """$pid = {pid}
+try {{
+    Wait-Process -Id $pid -Timeout 30 -ErrorAction SilentlyContinue
+}} catch {{ }}
+Start-Process "{new_exe}" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
+Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+""".format(pid=pid, new_exe=new_exe)
         try:
-            abs_exe = os.path.abspath(new_exe)
-            subprocess.Popen([abs_exe, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
-            log("Installer gestartet, Anwendung wird beendet...")
+            with open(installer_ps1, "w", encoding="utf-8") as f:
+                f.write(script)
+            log(f"Installer-Skript geschrieben: {installer_ps1}")
+            subprocess.Popen(["powershell", "-ExecutionPolicy", "Bypass",
+                              "-File", installer_ps1],
+                             creationflags=CREATE_NO_WINDOW)
+            log("Installer-Wrapper gestartet, Anwendung wird beendet...")
             if exit_app:
                 sys.exit(0)
             return True
@@ -2359,7 +2373,15 @@ class VPNApp(QMainWindow):
     def _exit_for_update(self):
         self._save_settings()
         _stop_dialog_dismisser()
+        global _mutex
+        if _mutex:
+            try:
+                ctypes.windll.kernel32.CloseHandle(_mutex)
+                _mutex = None
+            except Exception:
+                pass
         QApplication.quit()
+        sys.exit(0)
 
     # ── VPN Connect ────────────────────────────────────────────────────────
 
@@ -2916,7 +2938,7 @@ class VPNApp(QMainWindow):
         self._auto_refresh_timer.stop()
 
     def _auto_refresh_tick(self):
-        if not self.upsnap or not self.vpn_connected:
+        if not self.upsnap:
             return
         if self._refresh_in_progress:
             return                              # vorherigen Aufruf abwarten
