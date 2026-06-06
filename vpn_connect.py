@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.7"
+APP_VERSION = "4.0.8"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -944,18 +944,30 @@ def apply_update(new_exe: str, exit_app: bool = True) -> bool:
         pid = os.getpid()
         temp_dir = os.environ.get("TEMP", _base_dir)
         installer_ps1 = os.path.join(temp_dir, "_vpn_installer.ps1")
-        script = """$pid = {pid}
+        installer_log = os.path.join(temp_dir, "_vpn_installer.log")
+        script = """$ErrorActionPreference = "Continue"
+$logFile = "{log_file}"
+"$(Get-Date -Format o) Installer-Skript gestartet" | Out-File $logFile -Encoding UTF8
+$pid = {pid}
 try {{
+    "$(Get-Date -Format o) Warte auf PID $pid ..." | Out-File $logFile -Append -Encoding UTF8
     Wait-Process -Id $pid -Timeout 30 -ErrorAction SilentlyContinue
 }} catch {{ }}
-Start-Process "{new_exe}" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
+"$(Get-Date -Format o) Starte Installer: {new_exe}" | Out-File $logFile -Append -Encoding UTF8
+try {{
+    Start-Process "{new_exe}" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+    "$(Get-Date -Format o) Installer abgeschlossen" | Out-File $logFile -Append -Encoding UTF8
+}} catch {{
+    "$(Get-Date -Format o) Installer-Fehler: $_" | Out-File $logFile -Append -Encoding UTF8
+}}
 Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-""".format(pid=pid, new_exe=new_exe)
+""".format(pid=pid, new_exe=new_exe, log_file=installer_log)
         try:
             with open(installer_ps1, "w", encoding="utf-8") as f:
                 f.write(script)
             log(f"Installer-Skript geschrieben: {installer_ps1}")
-            subprocess.Popen(["powershell", "-ExecutionPolicy", "Bypass",
+            ps_exe = _resolve_executable("powershell.exe")
+            subprocess.Popen([ps_exe, "-ExecutionPolicy", "Bypass",
                               "-File", installer_ps1],
                              creationflags=CREATE_NO_WINDOW)
             log("Installer-Wrapper gestartet, Anwendung wird beendet...")
@@ -974,8 +986,11 @@ Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
     # Hilfsskript schreiben, das nach Prozessende ersetzt
     temp_dir = os.environ.get("TEMP", _base_dir)
     updater_ps1 = os.path.join(temp_dir, "_vpn_updater.ps1")
+    updater_log = os.path.join(temp_dir, "_vpn_updater.log")
 
-    script = """$ErrorActionPreference = "Stop"
+    script = """$ErrorActionPreference = "Continue"
+$logFile = "{log_file}"
+"$(Get-Date -Format o) Updater-Skript gestartet" | Out-File $logFile -Encoding UTF8
 $current = "{current}"
 $new = "{new}"
 $target = "{target}"
@@ -983,8 +998,10 @@ $backup = "{backup}"
 $pid = {pid}
 
 try {{
+    "$(Get-Date -Format o) Warte auf PID $pid ..." | Out-File $logFile -Append -Encoding UTF8
     Wait-Process -Id $pid -Timeout 30 -ErrorAction SilentlyContinue
 }} catch {{ }}
+"$(Get-Date -Format o) Prozess beendet, starte Update..." | Out-File $logFile -Append -Encoding UTF8
 
 function Wait-ForUnlock($path, $retries) {{
     for ($i=0; $i -lt $retries; $i++) {{
@@ -1004,26 +1021,49 @@ if (Test-Path $backup) {{ Remove-Item $backup -Force -ErrorAction SilentlyContin
 $currentFull = [System.IO.Path]::GetFullPath($current)
 $targetFull = [System.IO.Path]::GetFullPath($target)
 $samePath = [System.String]::Equals($currentFull, $targetFull, [System.StringComparison]::OrdinalIgnoreCase)
+"$(Get-Date -Format o) current=$currentFull target=$targetFull samePath=$samePath" | Out-File $logFile -Append -Encoding UTF8
 
-if (-not (Wait-ForUnlock $current 40)) {{ Write-Host "Aktuelle Datei gesperrt"; exit 1 }}
-
-if ($samePath) {{
-    Move-Item -Force $current $backup
-}} else {{
-    if (Test-Path $target) {{
-        if (-not (Wait-ForUnlock $target 40)) {{ Write-Host "Zieldatei gesperrt"; exit 1 }}
-        Move-Item -Force $target $backup
-    }}
-    if (Test-Path $current) {{
-        Remove-Item $current -Force -ErrorAction SilentlyContinue
-    }}
+"$(Get-Date -Format o) Warte auf Unlock: $current" | Out-File $logFile -Append -Encoding UTF8
+if (-not (Wait-ForUnlock $current 40)) {{
+    "$(Get-Date -Format o) FEHLER: Aktuelle Datei gesperrt" | Out-File $logFile -Append -Encoding UTF8
+    exit 1
 }}
 
-Move-Item -Force $new $target
+try {{
+    if ($samePath) {{
+        "$(Get-Date -Format o) Move current -> backup" | Out-File $logFile -Append -Encoding UTF8
+        Move-Item -Force $current $backup
+    }} else {{
+        if (Test-Path $target) {{
+            "$(Get-Date -Format o) Warte auf Unlock: $target" | Out-File $logFile -Append -Encoding UTF8
+            if (-not (Wait-ForUnlock $target 40)) {{
+                "$(Get-Date -Format o) FEHLER: Zieldatei gesperrt" | Out-File $logFile -Append -Encoding UTF8
+                exit 1
+            }}
+            Move-Item -Force $target $backup
+        }}
+        if (Test-Path $current) {{
+            Remove-Item $current -Force -ErrorAction SilentlyContinue
+        }}
+    }}
 
-Start-Process $target "--cleanup"
+    "$(Get-Date -Format o) Move new -> target" | Out-File $logFile -Append -Encoding UTF8
+    Move-Item -Force $new $target
+    "$(Get-Date -Format o) Starte neue Version: $target" | Out-File $logFile -Append -Encoding UTF8
+    Start-Process $target "--cleanup"
+    "$(Get-Date -Format o) Update erfolgreich abgeschlossen" | Out-File $logFile -Append -Encoding UTF8
+}} catch {{
+    "$(Get-Date -Format o) FEHLER: $_" | Out-File $logFile -Append -Encoding UTF8
+    # Rollback versuchen
+    if ((Test-Path $backup) -and -not (Test-Path $target)) {{
+        "$(Get-Date -Format o) Rollback: backup -> target" | Out-File $logFile -Append -Encoding UTF8
+        Move-Item -Force $backup $target
+    }}
+    exit 1
+}}
 Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-""".format(current=current, new=new_exe, target=target, backup=backup, pid=pid)
+""".format(current=current, new=new_exe, target=target, backup=backup,
+           pid=pid, log_file=updater_log)
     try:
         with open(updater_ps1, "w", encoding="utf-8") as f:
             f.write(script)
@@ -2319,7 +2359,10 @@ class VPNApp(QMainWindow):
 
         def work():
             temp_dir = os.environ.get("TEMP", _base_dir)
-            dest = os.path.join(temp_dir, f"VPN_Connect_update_{os.getpid()}.exe")
+            # Originalen Asset-Namen verwenden, damit apply_update erkennen
+            # kann ob es ein Installer ("setup" im Namen) ist
+            original_name = info.get("name", f"VPN_Connect_update_{os.getpid()}.exe")
+            dest = os.path.join(temp_dir, original_name)
             expected_sha = info.get("sha")
             expected_size = info.get("size", 0)
 
