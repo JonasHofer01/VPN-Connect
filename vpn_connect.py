@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.8"
+APP_VERSION = "4.0.9"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -948,10 +948,10 @@ def apply_update(new_exe: str, exit_app: bool = True) -> bool:
         script = """$ErrorActionPreference = "Continue"
 $logFile = "{log_file}"
 "$(Get-Date -Format o) Installer-Skript gestartet" | Out-File $logFile -Encoding UTF8
-$pid = {pid}
+$appPid = {pid}
 try {{
-    "$(Get-Date -Format o) Warte auf PID $pid ..." | Out-File $logFile -Append -Encoding UTF8
-    Wait-Process -Id $pid -Timeout 30 -ErrorAction SilentlyContinue
+    "$(Get-Date -Format o) Warte auf PID $appPid ..." | Out-File $logFile -Append -Encoding UTF8
+    Wait-Process -Id $appPid -Timeout 30 -ErrorAction SilentlyContinue
 }} catch {{ }}
 "$(Get-Date -Format o) Starte Installer: {new_exe}" | Out-File $logFile -Append -Encoding UTF8
 try {{
@@ -995,11 +995,11 @@ $current = "{current}"
 $new = "{new}"
 $target = "{target}"
 $backup = "{backup}"
-$pid = {pid}
+$appPid = {pid}
 
 try {{
-    "$(Get-Date -Format o) Warte auf PID $pid ..." | Out-File $logFile -Append -Encoding UTF8
-    Wait-Process -Id $pid -Timeout 30 -ErrorAction SilentlyContinue
+    "$(Get-Date -Format o) Warte auf PID $appPid ..." | Out-File $logFile -Append -Encoding UTF8
+    Wait-Process -Id $appPid -Timeout 30 -ErrorAction SilentlyContinue
 }} catch {{ }}
 "$(Get-Date -Format o) Prozess beendet, starte Update..." | Out-File $logFile -Append -Encoding UTF8
 
