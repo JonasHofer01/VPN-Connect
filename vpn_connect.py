@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.9"
+APP_VERSION = "4.0.10"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -944,10 +944,10 @@ def apply_update(new_exe: str, exit_app: bool = True) -> bool:
         pid = os.getpid()
         temp_dir = os.environ.get("TEMP", _base_dir)
         installer_ps1 = os.path.join(temp_dir, "_vpn_installer.ps1")
-        installer_log = os.path.join(temp_dir, "_vpn_installer.log")
+        installer_log = log_file
         script = """$ErrorActionPreference = "Continue"
 $logFile = "{log_file}"
-"$(Get-Date -Format o) Installer-Skript gestartet" | Out-File $logFile -Encoding UTF8
+"$(Get-Date -Format o) Installer-Skript gestartet" | Out-File $logFile -Append -Encoding UTF8
 $appPid = {pid}
 try {{
     "$(Get-Date -Format o) Warte auf PID $appPid ..." | Out-File $logFile -Append -Encoding UTF8
@@ -986,11 +986,11 @@ Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
     # Hilfsskript schreiben, das nach Prozessende ersetzt
     temp_dir = os.environ.get("TEMP", _base_dir)
     updater_ps1 = os.path.join(temp_dir, "_vpn_updater.ps1")
-    updater_log = os.path.join(temp_dir, "_vpn_updater.log")
+    updater_log = log_file
 
     script = """$ErrorActionPreference = "Continue"
 $logFile = "{log_file}"
-"$(Get-Date -Format o) Updater-Skript gestartet" | Out-File $logFile -Encoding UTF8
+"$(Get-Date -Format o) Updater-Skript gestartet" | Out-File $logFile -Append -Encoding UTF8
 $current = "{current}"
 $new = "{new}"
 $target = "{target}"
