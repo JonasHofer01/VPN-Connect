@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QListWidget, QFrame,
     QScrollArea, QTextEdit, QMessageBox, QSystemTrayIcon, QMenu,
     QCheckBox, QDialog, QFormLayout, QDialogButtonBox, QComboBox,
-    QTabWidget, QSizePolicy, QGridLayout,
+    QTabWidget, QSizePolicy, QGridLayout, QGraphicsDropShadowEffect
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import (
@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.10"
+APP_VERSION = "4.0.11"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -1374,7 +1374,7 @@ QCheckBox::indicator:checked:hover {{
 /* Tabs */
 QTabWidget::pane {{
     border: 1px solid {C['border']};
-    border-radius: 8px;
+    border-radius: 12px;
     top: -1px;
     background: {C['bg']};
 }}
@@ -1531,6 +1531,21 @@ def _make_btn(text: str, bg: str, fg: str, hover: str,
 #  GUI
 # =============================================================================
 
+def _apply_dark_titlebar(window):
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        set_window_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
+        hwnd = int(window.winId())
+        rendering_policy = ctypes.c_int(1)
+        set_window_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(rendering_policy), ctypes.sizeof(rendering_policy))
+        DWMWA_USE_IMMERSIVE_DARK_MODE_V2 = 19
+        set_window_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_V2, ctypes.byref(rendering_policy), ctypes.sizeof(rendering_policy))
+    except Exception as e:
+        log(f"Dark Titlebar error: {e}")
+
 class VPNApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1545,6 +1560,8 @@ class VPNApp(QMainWindow):
             "  Strg+L   Log ein/aus\n"
             "  Strg+H   Verlauf ein/aus"
         )
+        
+        _apply_dark_titlebar(self)
 
         self.configs: List[Tuple[str, str]] = []
         self.active_config: Optional[str] = None
@@ -1741,9 +1758,14 @@ class VPNApp(QMainWindow):
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 {C['card']}, stop:1 {C['surface']});
                 border: 1px solid {C['border']};
-                border-radius: 8px;
+                border-radius: 12px;
             }}
         """)
+        shadow_sb = QGraphicsDropShadowEffect(self)
+        shadow_sb.setBlurRadius(15)
+        shadow_sb.setColor(QColor(0, 0, 0, 100))
+        shadow_sb.setOffset(0, 4)
+        status_bar.setGraphicsEffect(shadow_sb)
         status_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         status_bar.setFixedHeight(40)
         sb_layout = QHBoxLayout(status_bar)
@@ -1811,9 +1833,14 @@ class VPNApp(QMainWindow):
             QFrame {{
                 background-color: {C['card']};
                 border: 1px solid {C['border']};
-                border-radius: 8px;
+                border-radius: 12px;
             }}
         """)
+        shadow_wg = QGraphicsDropShadowEffect(self)
+        shadow_wg.setBlurRadius(20)
+        shadow_wg.setColor(QColor(0, 0, 0, 120))
+        shadow_wg.setOffset(0, 6)
+        wg_card.setGraphicsEffect(shadow_wg)
         wg_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         wg_layout = QVBoxLayout(wg_card)
         wg_layout.setContentsMargins(12, 8, 12, 8)
@@ -1869,9 +1896,14 @@ class VPNApp(QMainWindow):
             QFrame {{
                 background-color: {C['card']};
                 border: 1px solid {C['border']};
-                border-radius: 8px;
+                border-radius: 12px;
             }}
         """)
+        shadow_snap = QGraphicsDropShadowEffect(self)
+        shadow_snap.setBlurRadius(20)
+        shadow_snap.setColor(QColor(0, 0, 0, 120))
+        shadow_snap.setOffset(0, 6)
+        snap_card.setGraphicsEffect(shadow_snap)
         snap_layout = QVBoxLayout(snap_card)
         snap_layout.setContentsMargins(12, 8, 12, 10)
         snap_layout.setSpacing(6)
@@ -2222,13 +2254,20 @@ class VPNApp(QMainWindow):
         header.setStyleSheet(f"""
             QPushButton {{
                 background-color: {C['surface']}; color: {C['fg']}; border: 1px solid {C['border']};
-                border-radius: 6px; padding: 10px 15px; text-align: left; font-weight: bold; font-size: 10pt;
+                border-radius: 8px; padding: 10px 15px; text-align: left; font-weight: bold; font-size: 10pt;
             }}
             QPushButton:hover {{ background-color: {C['surface_h']}; }}
         """)
 
         body = QFrame()
-        body.setStyleSheet(f"QFrame {{ background: {C['card']}; border: 1px solid {C['border']}; border-top: none; border-bottom-left-radius: 8px; border-bottom-right-radius: 8px; }}")
+        body.setStyleSheet(f"QFrame {{ background: {C['card']}; border: 1px solid {C['border']}; border-top: none; border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }}")
+        
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(15)
+        shadow.setColor(QColor(0, 0, 0, 80))
+        shadow.setOffset(0, 3)
+        container.setGraphicsEffect(shadow)
+        
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(16, 12, 16, 12)
         body_layout.setSpacing(12)
