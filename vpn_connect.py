@@ -40,7 +40,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.17"
+APP_VERSION = "4.0.18"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -640,6 +640,7 @@ class UpSnapClient:
         self._user = user
         self._pw = pw
         self._last_status: int = 0          # letzter HTTP-Statuscode
+        self._auth_path: str = ""
         if user and pw:
             self._auth(user, pw)
 
@@ -667,14 +668,24 @@ class UpSnapClient:
 
     def _auth(self, user: str, pw: str) -> bool:
         log("UpSnap: Anmeldung...")
-        for ep, label in (
+        candidates = []
+        if self._auth_path:
+            candidates.append((self._auth_path, "bekannter"))
+        candidates.extend([
             ("/api/collections/_superusers/auth-with-password", "Superuser"),
             ("/api/admins/auth-with-password", "Admin"),
             ("/api/collections/users/auth-with-password", "User"),
-        ):
-            r = self._req("POST", ep, {"identity": user, "password": pw})
+        ])
+
+        seen = set()
+        for ep, label in candidates:
+            if ep in seen:
+                continue
+            seen.add(ep)
+            r = self._req("POST", ep, {"identity": user, "password": pw}, silent=True)
             if r and "token" in r:
                 self.token = r["token"]
+                self._auth_path = ep
                 log(f"UpSnap: Angemeldet als {label}.")
                 return True
         log("UpSnap: Login fehlgeschlagen.", "error")
@@ -1840,19 +1851,13 @@ class VPNApp(QMainWindow):
 
         main_tab_layout.addLayout(home_topbar)
 
-        self.home_modules_list = HomeModuleList()
-        self.home_modules_list.setObjectName("homeModulesList")
-        self.home_modules_list.setStyleSheet(f"""
-            QListWidget#homeModulesList {{
-                background: transparent;
-                border: none;
-                outline: 0;
-            }}
-            QListWidget#homeModulesList::item {{
-                margin: 0px;
-            }}
-        """)
-        main_tab_layout.addWidget(self.home_modules_list)
+        self.home_modules_container = QWidget()
+        self.home_modules_container.setObjectName("homeModulesContainer")
+        self.home_modules_container.setStyleSheet("background: transparent; border: none;")
+        self.home_modules_layout = QVBoxLayout(self.home_modules_container)
+        self.home_modules_layout.setContentsMargins(0, 0, 0, 0)
+        self.home_modules_layout.setSpacing(10)
+        main_tab_layout.addWidget(self.home_modules_container)
 
         # ── Verbindungs-Status-Bar ──
         status_bar = QFrame()
@@ -2373,19 +2378,18 @@ class VPNApp(QMainWindow):
             self._home_module_visibility.setdefault(key, True)
 
     def _apply_home_modules(self):
-        if not hasattr(self, "home_modules_list"):
+        if not hasattr(self, "home_modules_layout"):
             return
         self._normalize_home_modules()
+        module_widgets = set(self._home_modules.values())
 
-        while self.home_modules_list.count():
-            item = self.home_modules_list.item(0)
-            if not item:
-                continue
-            widget = self.home_modules_list.itemWidget(item)
+        while self.home_modules_layout.count():
+            item = self.home_modules_layout.takeAt(0)
+            widget = item.widget() if item else None
             if widget:
-                self.home_modules_list.removeItemWidget(item)
                 widget.setParent(None)
-            self.home_modules_list.takeItem(0)
+                if widget not in module_widgets:
+                    widget.deleteLater()
 
         visible_keys = [key for key in self._home_module_order if self._home_module_visibility.get(key, True)]
         any_visible = bool(visible_keys)
@@ -2395,17 +2399,7 @@ class VPNApp(QMainWindow):
                 if not widget:
                     continue
                 widget.show()
-                item = QListWidgetItem()
-                item.setData(Qt.ItemDataRole.UserRole, key)
-                item.setFlags(
-                    Qt.ItemFlag.ItemIsEnabled |
-                    Qt.ItemFlag.ItemIsSelectable |
-                    Qt.ItemFlag.ItemIsDragEnabled |
-                    Qt.ItemFlag.ItemIsDropEnabled
-                )
-                item.setSizeHint(widget.sizeHint())
-                self.home_modules_list.addItem(item)
-                self.home_modules_list.setItemWidget(item, widget)
+                self.home_modules_layout.addWidget(widget)
 
         if not any_visible:
             empty = QLabel("Keine Module aktiv. Startseite anpassen, um Module einzublenden.")
@@ -2417,11 +2411,7 @@ class VPNApp(QMainWindow):
                 border-radius: 8px;
                 padding: 22px;
             """)
-            item = QListWidgetItem()
-            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            item.setSizeHint(empty.sizeHint())
-            self.home_modules_list.addItem(item)
-            self.home_modules_list.setItemWidget(item, empty)
+            self.home_modules_layout.addWidget(empty)
 
     def _show_home_customize_dialog(self):
         self._normalize_home_modules()
