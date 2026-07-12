@@ -26,7 +26,8 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QFrame,
     QScrollArea, QTextEdit, QMessageBox, QSystemTrayIcon, QMenu,
     QCheckBox, QDialog, QFormLayout, QDialogButtonBox, QComboBox,
-    QTabWidget, QSizePolicy, QGridLayout, QGraphicsDropShadowEffect
+    QTabWidget, QSizePolicy, QGridLayout, QGraphicsDropShadowEffect,
+    QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import (
@@ -39,7 +40,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.14"
+APP_VERSION = "4.0.15"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -1526,6 +1527,23 @@ class DotWidget(QWidget):
         p.end()
 
 
+class HomeModuleList(QListWidget):
+    orderChanged = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        self.orderChanged.emit()
+
+
 def _make_btn(text: str, bg: str, fg: str, hover: str,
               parent=None) -> QPushButton:
     """Erstellt einen Win11-Fluent-styled Button."""
@@ -1807,56 +1825,43 @@ class VPNApp(QMainWindow):
         main_tab_layout.setContentsMargins(12, 10, 12, 12)
         main_tab_layout.setSpacing(10)
 
-        home_hero = QFrame()
-        home_hero.setObjectName("homeHero")
-        home_hero.setStyleSheet(f"""
-            QFrame#homeHero {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 {C['card']}, stop:1 {C['surface']});
-                border: 1px solid {C['border']};
-                border-radius: 12px;
-            }}
-        """)
-        hero_shadow = QGraphicsDropShadowEffect(self)
-        hero_shadow.setBlurRadius(22)
-        hero_shadow.setColor(QColor(0, 0, 0, 90))
-        hero_shadow.setOffset(0, 6)
-        home_hero.setGraphicsEffect(hero_shadow)
-        hero_layout = QHBoxLayout(home_hero)
-        hero_layout.setContentsMargins(18, 14, 18, 14)
-        hero_layout.setSpacing(12)
+        home_topbar = QHBoxLayout()
+        home_topbar.setContentsMargins(0, 0, 0, 0)
+        home_topbar.setSpacing(10)
 
         home_title_box = QVBoxLayout()
-        home_title_box.setSpacing(2)
-        home_badge = QLabel("Modularer Dashboard-Start")
-        home_badge.setStyleSheet(f"color: {C['accent']}; font-size: 8.5pt; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase;")
+        home_title_box.setSpacing(1)
         home_title = QLabel("Startseite")
         home_title.setFont(QFont("Segoe UI Variable Text", 15, QFont.Weight.DemiBold))
         home_title.setStyleSheet(f"color: {C['fg']};")
-        home_subtitle = QLabel("Die wichtigsten Funktionen als anpassbare Module statt als unuebersichtliche Kacheln.")
-        home_subtitle.setWordWrap(True)
+        home_subtitle = QLabel("Module per Drag & Drop anordnen")
         home_subtitle.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
-        home_title_box.addWidget(home_badge)
         home_title_box.addWidget(home_title)
         home_title_box.addWidget(home_subtitle)
-        hero_layout.addLayout(home_title_box, 2)
+        home_topbar.addLayout(home_title_box)
+        home_topbar.addStretch()
 
-        hero_actions = QVBoxLayout()
-        hero_actions.setSpacing(8)
         self.btn_quick_login = _make_btn("UpSnap per Popup", C["accent"], "#000000", C["accent_h"])
         self.btn_quick_login.setToolTip("UpSnap Login als Popup öffnen")
         self.btn_quick_login.clicked.connect(lambda checked=False: self._on_upsnap_login(show_dialog=True))
-        hero_actions.addWidget(self.btn_quick_login)
-        hero_layout.addLayout(hero_actions)
+        home_topbar.addWidget(self.btn_quick_login)
 
-        main_tab_layout.addWidget(home_hero)
+        main_tab_layout.addLayout(home_topbar)
 
-        self.home_modules_container = QWidget()
-        self.home_modules_layout = QGridLayout(self.home_modules_container)
-        self.home_modules_layout.setContentsMargins(0, 0, 0, 0)
-        self.home_modules_layout.setHorizontalSpacing(10)
-        self.home_modules_layout.setVerticalSpacing(10)
-        main_tab_layout.addWidget(self.home_modules_container)
+        self.home_modules_list = HomeModuleList()
+        self.home_modules_list.setObjectName("homeModulesList")
+        self.home_modules_list.setStyleSheet(f"""
+            QListWidget#homeModulesList {{
+                background: transparent;
+                border: none;
+                outline: 0;
+            }}
+            QListWidget#homeModulesList::item {{
+                margin: 0px;
+            }}
+        """)
+        self.home_modules_list.orderChanged.connect(self._on_home_module_order_changed)
+        main_tab_layout.addWidget(self.home_modules_list)
 
         # ── Verbindungs-Status-Bar ──
         status_bar = QFrame()
@@ -2377,39 +2382,39 @@ class VPNApp(QMainWindow):
             self._home_module_visibility.setdefault(key, True)
 
     def _apply_home_modules(self):
-        if not hasattr(self, "home_modules_layout"):
+        if not hasattr(self, "home_modules_list"):
             return
         self._normalize_home_modules()
         module_widgets = list(self._home_modules.values())
 
-        while self.home_modules_layout.count():
-            item = self.home_modules_layout.takeAt(0)
-            widget = item.widget()
-            if not widget:
+        while self.home_modules_list.count():
+            item = self.home_modules_list.takeItem(0)
+            if not item:
                 continue
-            if any(widget is module for module in module_widgets):
+            widget = self.home_modules_list.itemWidget(item)
+            if widget:
+                self.home_modules_list.removeItemWidget(item)
                 widget.setParent(None)
-            else:
-                widget.deleteLater()
 
         visible_keys = [key for key in self._home_module_order if self._home_module_visibility.get(key, True)]
         any_visible = bool(visible_keys)
         if any_visible:
-            row = 0
-            if "status" in visible_keys:
-                widget = self._home_modules.get("status")
-                if widget:
-                    widget.show()
-                    self.home_modules_layout.addWidget(widget, row, 0, 1, 2)
-                    row += 1
-
-            remaining_keys = [key for key in visible_keys if key != "status"]
-            for index, key in enumerate(remaining_keys):
+            for key in visible_keys:
                 widget = self._home_modules.get(key)
                 if not widget:
                     continue
                 widget.show()
-                self.home_modules_layout.addWidget(widget, row + (index // 2), index % 2)
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, key)
+                item.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled |
+                    Qt.ItemFlag.ItemIsSelectable |
+                    Qt.ItemFlag.ItemIsDragEnabled |
+                    Qt.ItemFlag.ItemIsDropEnabled
+                )
+                item.setSizeHint(widget.sizeHint())
+                self.home_modules_list.addItem(item)
+                self.home_modules_list.setItemWidget(item, widget)
 
         if not any_visible:
             empty = QLabel("Keine Module aktiv. Startseite anpassen, um Module einzublenden.")
@@ -2421,7 +2426,22 @@ class VPNApp(QMainWindow):
                 border-radius: 8px;
                 padding: 22px;
             """)
-            self.home_modules_layout.addWidget(empty)
+            item = QListWidgetItem()
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            item.setSizeHint(empty.sizeHint())
+            self.home_modules_list.addItem(item)
+            self.home_modules_list.setItemWidget(item, empty)
+
+    def _on_home_module_order_changed(self):
+        order = []
+        for i in range(self.home_modules_list.count()):
+            item = self.home_modules_list.item(i)
+            key = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(key, str) and key in self._home_modules:
+                order.append(key)
+        if order:
+            self._home_module_order = order
+            self._schedule_save()
 
     def _show_home_customize_dialog(self):
         self._normalize_home_modules()
