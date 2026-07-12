@@ -40,7 +40,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.19"
+APP_VERSION = "4.0.20"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -1867,8 +1867,6 @@ class VPNApp(QMainWindow):
         self.home_modules_layout.setSpacing(10)
         main_tab_layout.addWidget(self.home_modules_container)
 
-        self._refresh_home_dashboard()
-
         # ── Verbindungs-Status-Bar ──
         status_bar = QFrame()
         status_bar.setStyleSheet(f"""
@@ -2377,6 +2375,8 @@ class VPNApp(QMainWindow):
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._toggle_log)
         QShortcut(QKeySequence("Ctrl+H"), self).activated.connect(self._toggle_history)
 
+        self._refresh_home_dashboard()
+
     def _normalize_home_modules(self):
         available = list(self._home_modules.keys())
         order = [key for key in self._home_module_order if key in available]
@@ -2683,7 +2683,7 @@ class VPNApp(QMainWindow):
 
         if self.vpn_connected:
             vpn_value = "Verbunden"
-            vpn_detail = self.duration_label.text() or "Verbindung aktiv"
+            vpn_detail = getattr(self, "duration_label", QLabel()).text() or "Verbindung aktiv"
             vpn_color = C["green"]
         else:
             vpn_value = "Getrennt"
@@ -2694,8 +2694,10 @@ class VPNApp(QMainWindow):
         self.home_status_card._home_value_label.setStyleSheet(f"color: {vpn_color}; font-size: 11pt; font-weight: 700;")
         self.home_status_card._home_detail_label.setText(vpn_detail)
 
-        ping_value = self.ping_label.text() if self.ping_label.text() else "Ping --"
-        transfer_value = self.transfer_label.text() if self.transfer_label.text() else "Noch keine Statistik"
+        ping_label = getattr(self, "ping_label", None)
+        transfer_label = getattr(self, "transfer_label", None)
+        ping_value = ping_label.text() if ping_label and ping_label.text() else "Ping --"
+        transfer_value = transfer_label.text() if transfer_label and transfer_label.text() else "Noch keine Statistik"
         self.home_perf_card._home_value_label.setText(ping_value)
         self.home_perf_card._home_detail_label.setText(transfer_value)
 
