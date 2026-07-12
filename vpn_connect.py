@@ -40,7 +40,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.15"
+APP_VERSION = "4.0.16"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -2385,16 +2385,16 @@ class VPNApp(QMainWindow):
         if not hasattr(self, "home_modules_list"):
             return
         self._normalize_home_modules()
-        module_widgets = list(self._home_modules.values())
 
         while self.home_modules_list.count():
-            item = self.home_modules_list.takeItem(0)
+            item = self.home_modules_list.item(0)
             if not item:
                 continue
             widget = self.home_modules_list.itemWidget(item)
             if widget:
                 self.home_modules_list.removeItemWidget(item)
                 widget.setParent(None)
+            self.home_modules_list.takeItem(0)
 
         visible_keys = [key for key in self._home_module_order if self._home_module_visibility.get(key, True)]
         any_visible = bool(visible_keys)
