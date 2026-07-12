@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.11"
+APP_VERSION = "4.0.12"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -1275,26 +1275,66 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
 QLabel {{
     background: transparent;
 }}
+#settingsScroll QLabel {{
+    color: #c8d6e5;
+    font-size: 9.5pt;
+}}
 /* Eingabefelder */
 QLineEdit {{
-    background-color: {C['surface']};
+    background-color: #253248;
     color: {C['fg']};
-    border: 1px solid {C['border']};
+    border: 2px solid #2f3f55;
     border-radius: 4px;
-    padding: 6px 10px;
+    padding: 8px 12px;
     selection-background-color: {C['accent']};
     selection-color: #000000;
 }}
 QLineEdit:hover {{
-    border: 1px solid {C['border_l']};
+    border: 2px solid {C['border_l']};
     background-color: {C['surface_h']};
 }}
 QLineEdit:focus {{
-    border: 1px solid {C['accent']};
+    border: 2px solid {C['accent']};
     background-color: {C['surface_h']};
 }}
 QLineEdit::placeholder {{
-    color: {C['dim']};
+    color: #7891ab;
+}}
+/* ComboBox */
+QComboBox {{
+    background-color: #253248;
+    color: {C['fg']};
+    border: 2px solid #2f3f55;
+    border-radius: 4px;
+    padding: 8px 12px;
+    min-width: 6em;
+}}
+QComboBox:hover {{
+    border: 2px solid {C['border_l']};
+}}
+QComboBox:focus {{
+    border: 2px solid {C['accent']};
+}}
+QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 15px;
+    border-left-width: 0px;
+}}
+QComboBox QAbstractItemView {{
+    background-color: {C['card']};
+    color: {C['fg']};
+    selection-background-color: {C['accent']};
+    selection-color: #000000;
+    border: 1px solid {C['border']};
+}}
+/* ToolTip */
+QToolTip {{
+    background-color: {C['card']};
+    color: {C['fg']};
+    border: 1px solid {C['border']};
+    padding: 5px;
+    border-radius: 4px;
 }}
 /* Listen */
 QListWidget {{
@@ -1333,7 +1373,8 @@ QTextEdit {{
 QPushButton {{
     border: 1px solid {C['border']};
     border-radius: 7px;
-    padding: 9px 16px;
+    padding: 8px 16px;
+    min-height: 34px;
     font-size: 9pt;
     font-family: 'Segoe UI Variable Text', 'Segoe UI';
     font-weight: 600;
@@ -1665,7 +1706,7 @@ class VPNApp(QMainWindow):
         self.sig.logged_in_signal.connect(self._on_logged_in)
         self.sig.update_available_signal.connect(self._show_update_btn)
         self.sig.update_progress_signal.connect(
-            lambda t: self.btn_update.setText(t))
+            lambda t: (self.btn_update.setText(t), self.btn_update_settings.setText(t)))
         self.sig.update_failed_signal.connect(self._on_update_failed)
         self.sig.apply_update_signal.connect(self._apply_update)
         self.sig.update_ready_to_exit_signal.connect(self._exit_for_update)
@@ -1720,27 +1761,33 @@ class VPNApp(QMainWindow):
 
         # Tabs
         tabs = QTabWidget()
+        self.tabs = tabs
         tabs.setStyleSheet(f"""
             QTabWidget::pane {{
                 border: 1px solid {C['border']};
-                border-radius: 8px;
+                border-radius: 12px;
                 background: {C['bg']};
             }}
             QTabBar::tab {{
                 background: {C['surface']};
-                color: {C['fg']};
-                padding: 8px 14px;
+                color: {C['dim']};
+                padding: 10px 20px;
                 border: 1px solid {C['border']};
                 border-bottom: 0px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                margin-right: 2px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                margin-right: 4px;
+                font-weight: 600;
             }}
             QTabBar::tab:selected {{
                 background: {C['card']};
-                color: {C['fg']};
+                color: {C['accent']};
                 border: 1px solid {C['border_l']};
-                border-bottom: 1px solid {C['card']};
+                border-bottom: 2px solid {C['accent']};
+            }}
+            QTabBar::tab:hover:!selected {{
+                color: {C['fg']};
+                background: {C['surface_h']};
             }}
         """)
         main_layout.addWidget(tabs)
@@ -1824,6 +1871,12 @@ class VPNApp(QMainWindow):
         self.btn_update.clicked.connect(self._on_update)
         self.btn_update.hide()
         sb_layout.addWidget(self.btn_update)
+
+        # Settings-Button (Zahnrad) – rechts in der Statusbar
+        self.btn_settings_shortcut = _make_btn("⚙", C["surface"], C["fg"], C["surface_h"])
+        self.btn_settings_shortcut.setToolTip("Einstellungen öffnen")
+        self.btn_settings_shortcut.clicked.connect(lambda: tabs.setCurrentIndex(1))
+        sb_layout.addWidget(self.btn_settings_shortcut)
 
         main_tab_layout.addWidget(status_bar)
 
@@ -1923,35 +1976,36 @@ class VPNApp(QMainWindow):
         snap_hdr.addWidget(self.device_info_label)
         snap_layout.addLayout(snap_hdr)
 
-        # Login-Zeile
-        login_row = QHBoxLayout()
-        login_row.setSpacing(6)
+        # Login-Bereich (Formular-Struktur)
+        login_grid = QGridLayout()
+        login_grid.setSpacing(10)
+        login_grid.setContentsMargins(0, 4, 0, 4)
 
-        self.lbl_email = QLabel("E-Mail")
-        self.lbl_email.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
-        login_row.addWidget(self.lbl_email)
+        self.lbl_email = QLabel("E-Mail-Adresse")
+        self.lbl_email.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; font-weight: bold;")
         self.entry_user = QLineEdit()
-        self.entry_user.setFixedWidth(190)
+        self.entry_user.setPlaceholderText("E-Mail-Adresse eingeben")
         self.entry_user.returnPressed.connect(lambda: self.entry_pass.setFocus())
         self.entry_user.editingFinished.connect(lambda: self._schedule_save())
-        login_row.addWidget(self.entry_user)
 
         self.lbl_pw = QLabel("Passwort")
-        self.lbl_pw.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
-        login_row.addWidget(self.lbl_pw)
+        self.lbl_pw.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; font-weight: bold;")
         self.entry_pass = QLineEdit()
-        self.entry_pass.setFixedWidth(150)
+        self.entry_pass.setPlaceholderText("Passwort eingeben")
         self.entry_pass.setEchoMode(QLineEdit.EchoMode.Password)
         self.entry_pass.returnPressed.connect(self._on_upsnap_login)
         self.entry_pass.editingFinished.connect(lambda: self._schedule_save())
-        login_row.addWidget(self.entry_pass)
 
         self.btn_login = _make_btn("Anmelden", C["accent"], "#000000", C["accent_h"])
         self.btn_login.clicked.connect(self._on_upsnap_login)
-        login_row.addWidget(self.btn_login)
 
-        login_row.addStretch()
-        snap_layout.addLayout(login_row)
+        login_grid.addWidget(self.lbl_email, 0, 0)
+        login_grid.addWidget(self.entry_user, 0, 1)
+        login_grid.addWidget(self.lbl_pw, 1, 0)
+        login_grid.addWidget(self.entry_pass, 1, 1)
+        login_grid.addWidget(self.btn_login, 2, 1, 1, 1, Qt.AlignmentFlag.AlignLeft)
+
+        snap_layout.addLayout(login_grid)
 
         # Separator
         sep = QFrame()
@@ -1973,6 +2027,7 @@ class VPNApp(QMainWindow):
 
         # Einstellungen-Tab
         settings_scroll = QScrollArea()
+        settings_scroll.setObjectName("settingsScroll")
         settings_scroll.setWidgetResizable(True)
         settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
         settings_content = QWidget()
@@ -1980,7 +2035,7 @@ class VPNApp(QMainWindow):
         settings_scroll.setWidget(settings_content)
         settings_layout = QVBoxLayout(settings_content)
         settings_layout.setContentsMargins(12, 12, 12, 12)
-        settings_layout.setSpacing(10)
+        settings_layout.setSpacing(16)
 
         # Styles für Checkboxen
         chk_qss = f"""
@@ -2167,9 +2222,20 @@ class VPNApp(QMainWindow):
         debug_vbox.addWidget(self._hline())
 
         debug_vbox.addWidget(self._sub_section_label("Wartung & Support"))
+        support_row = QHBoxLayout()
+        support_row.setSpacing(10)
+        
         support_btn = _make_btn("  Logs exportieren (ZIP)", C["surface"], C["fg"], C["surface_h"])
         support_btn.clicked.connect(self._export_support)
-        debug_vbox.addWidget(support_btn)
+        support_row.addWidget(support_btn)
+
+        self.btn_update_settings = _make_btn("⬇ Update suchen...", C["green"], "#000000", "#8fdf81")
+        self.btn_update_settings.clicked.connect(self._on_update)
+        self.btn_update_settings.hide()
+        support_row.addWidget(self.btn_update_settings)
+        
+        support_row.addStretch()
+        debug_vbox.addLayout(support_row)
 
         debug_vbox.addWidget(self._hline())
 
@@ -2207,8 +2273,8 @@ class VPNApp(QMainWindow):
 
         settings_layout.addStretch()
 
-        tabs.addTab(main_tab, "Haupt")
-        tabs.addTab(settings_scroll, "Einstellungen")
+        tabs.addTab(main_tab, "🏠 Haupt")
+        tabs.addTab(settings_scroll, "⚙ Einstellungen")
 
         # ── Tastaturkürzel ──
         QShortcut(QKeySequence("Ctrl+K"), self).activated.connect(
@@ -2232,7 +2298,7 @@ class VPNApp(QMainWindow):
     @staticmethod
     def _sub_section_label(text: str) -> QLabel:
         lbl = QLabel(text)
-        lbl.setStyleSheet(f"color: {C['accent']}; font-size: 8.5pt; font-weight: 600; text-transform: uppercase;")
+        lbl.setStyleSheet(f"color: {C['accent']}; font-size: 9pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px;")
         return lbl
 
     @staticmethod
@@ -2248,13 +2314,13 @@ class VPNApp(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        header = QPushButton(f"{icon}  {title}")
+        header = QPushButton(f"▼  {icon}  {title}")
         header.setCheckable(True)
         header.setChecked(True)
         header.setStyleSheet(f"""
             QPushButton {{
                 background-color: {C['surface']}; color: {C['fg']}; border: 1px solid {C['border']};
-                border-radius: 8px; padding: 10px 15px; text-align: left; font-weight: bold; font-size: 10pt;
+                border-radius: 8px 8px 0px 0px; padding: 10px 15px; text-align: left; font-weight: bold; font-size: 10pt;
             }}
             QPushButton:hover {{ background-color: {C['surface_h']}; }}
         """)
@@ -2272,7 +2338,29 @@ class VPNApp(QMainWindow):
         body_layout.setContentsMargins(16, 12, 16, 12)
         body_layout.setSpacing(12)
 
-        header.clicked.connect(lambda: body.setVisible(not body.isVisible()))
+        def on_toggle():
+            visible = not body.isVisible()
+            body.setVisible(visible)
+            if visible:
+                header.setText(f"▼  {icon}  {title}")
+                header.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {C['surface']}; color: {C['fg']}; border: 1px solid {C['border']};
+                        border-radius: 8px 8px 0px 0px; padding: 10px 15px; text-align: left; font-weight: bold; font-size: 10pt;
+                    }}
+                    QPushButton:hover {{ background-color: {C['surface_h']}; }}
+                """)
+            else:
+                header.setText(f"▶  {icon}  {title}")
+                header.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {C['surface']}; color: {C['fg']}; border: 1px solid {C['border']};
+                        border-radius: 8px; padding: 10px 15px; text-align: left; font-weight: bold; font-size: 10pt;
+                    }}
+                    QPushButton:hover {{ background-color: {C['surface_h']}; }}
+                """)
+
+        header.clicked.connect(on_toggle)
         layout.addWidget(header)
         layout.addWidget(body)
         return container, body_layout
@@ -2378,8 +2466,11 @@ class VPNApp(QMainWindow):
     def _show_update_btn(self, info: dict):
         tag = info["tag"]
         size_mb = info.get("size", 0) / (1024 * 1024)
-        self.btn_update.setText(f"⬆ Update {tag}  ({size_mb:.1f} MB)")
+        text = f"⬆ Update {tag}  ({size_mb:.1f} MB)"
+        self.btn_update.setText(text)
         self.btn_update.show()
+        self.btn_update_settings.setText(text)
+        self.btn_update_settings.show()
 
     def _on_update(self):
         info = self._update_info
@@ -2395,6 +2486,8 @@ class VPNApp(QMainWindow):
 
         self.btn_update.setEnabled(False)
         self.btn_update.setText("⬆ Lade herunter...")
+        self.btn_update_settings.setEnabled(False)
+        self.btn_update_settings.setText("⬆ Lade herunter...")
 
         def work():
             temp_dir = os.environ.get("TEMP", _base_dir)
@@ -2429,11 +2522,15 @@ class VPNApp(QMainWindow):
     def _on_update_failed(self):
         self.btn_update.setEnabled(True)
         self.btn_update.setText("⬆ Update fehlgeschlagen")
+        self.btn_update_settings.setEnabled(True)
+        self.btn_update_settings.setText("⬆ Update fehlgeschlagen")
         QMessageBox.critical(self, "Update", "Update fehlgeschlagen.")
 
     def _apply_update(self, new_exe: str):
         self.btn_update.setEnabled(False)
         self.btn_update.setText("⬆ Installiere...")
+        self.btn_update_settings.setEnabled(False)
+        self.btn_update_settings.setText("⬆ Installiere...")
         active_config = self.active_config
 
         def work():
