@@ -40,7 +40,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.18"
+APP_VERSION = "4.0.19"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -1844,12 +1844,20 @@ class VPNApp(QMainWindow):
         home_topbar.addLayout(home_title_box)
         home_topbar.addStretch()
 
-        self.btn_quick_login = _make_btn("UpSnap per Popup", C["accent"], "#000000", C["accent_h"])
-        self.btn_quick_login.setToolTip("UpSnap Login als Popup öffnen")
-        self.btn_quick_login.clicked.connect(lambda checked=False: self._on_upsnap_login(show_dialog=True))
-        home_topbar.addWidget(self.btn_quick_login)
-
         main_tab_layout.addLayout(home_topbar)
+
+        self.home_summary_row = QHBoxLayout()
+        self.home_summary_row.setContentsMargins(0, 0, 0, 0)
+        self.home_summary_row.setSpacing(10)
+
+        self.home_status_card = self._build_home_summary_card("VPN", "Getrennt", "Bereit für die nächste Verbindung")
+        self.home_perf_card = self._build_home_summary_card("Performance", "Ping --", "Noch keine aktive Verbindung")
+        self.home_upsnap_card = self._build_home_summary_card("UpSnap", "Nicht angemeldet", "Anmelden im Einstellungen-Tab")
+
+        self.home_summary_row.addWidget(self.home_status_card)
+        self.home_summary_row.addWidget(self.home_perf_card)
+        self.home_summary_row.addWidget(self.home_upsnap_card)
+        main_tab_layout.addLayout(self.home_summary_row)
 
         self.home_modules_container = QWidget()
         self.home_modules_container.setObjectName("homeModulesContainer")
@@ -1858,6 +1866,8 @@ class VPNApp(QMainWindow):
         self.home_modules_layout.setContentsMargins(0, 0, 0, 0)
         self.home_modules_layout.setSpacing(10)
         main_tab_layout.addWidget(self.home_modules_container)
+
+        self._refresh_home_dashboard()
 
         # ── Verbindungs-Status-Bar ──
         status_bar = QFrame()
@@ -2631,9 +2641,74 @@ class VPNApp(QMainWindow):
     # ── Status ─────────────────────────────────────────────────────────────
 
     def _set_status(self, text: str, color: str):
+        self._status_color = color
         self.status_dot.set_color(color)
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color}; background: transparent;")
+        self._refresh_home_dashboard()
+
+    def _build_home_summary_card(self, title: str, value: str, detail: str) -> QFrame:
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {C['card']}, stop:1 {C['surface']});
+                border: 1px solid {C['border']};
+                border-radius: 10px;
+            }}
+        """)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(4)
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet(f"color: {C['dim']}; font-size: 8.5pt; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase;")
+        value_label = QLabel(value)
+        value_label.setStyleSheet(f"color: {C['fg']}; font-size: 11pt; font-weight: 700;")
+        detail_label = QLabel(detail)
+        detail_label.setWordWrap(True)
+        detail_label.setStyleSheet(f"color: {C['dim']}; font-size: 8.5pt;")
+
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        layout.addWidget(detail_label)
+        card._home_value_label = value_label
+        card._home_detail_label = detail_label
+        return card
+
+    def _refresh_home_dashboard(self):
+        if not hasattr(self, "home_status_card"):
+            return
+
+        if self.vpn_connected:
+            vpn_value = "Verbunden"
+            vpn_detail = self.duration_label.text() or "Verbindung aktiv"
+            vpn_color = C["green"]
+        else:
+            vpn_value = "Getrennt"
+            vpn_detail = "Bereit für die nächste Verbindung"
+            vpn_color = getattr(self, "_status_color", C["red"])
+
+        self.home_status_card._home_value_label.setText(vpn_value)
+        self.home_status_card._home_value_label.setStyleSheet(f"color: {vpn_color}; font-size: 11pt; font-weight: 700;")
+        self.home_status_card._home_detail_label.setText(vpn_detail)
+
+        ping_value = self.ping_label.text() if self.ping_label.text() else "Ping --"
+        transfer_value = self.transfer_label.text() if self.transfer_label.text() else "Noch keine Statistik"
+        self.home_perf_card._home_value_label.setText(ping_value)
+        self.home_perf_card._home_detail_label.setText(transfer_value)
+
+        upsnap_value = self.upsnap_auth_label.text() if hasattr(self, "upsnap_auth_label") else "Nicht angemeldet"
+        if self.upsnap is not None:
+            upsnap_detail = "Geräte und Wecken sind aktiv"
+            upsnap_color = C["green"]
+        else:
+            upsnap_detail = "Anmelden im Einstellungen-Tab"
+            upsnap_color = C["dim"]
+        self.home_upsnap_card._home_value_label.setText(upsnap_value)
+        self.home_upsnap_card._home_value_label.setStyleSheet(f"color: {upsnap_color}; font-size: 11pt; font-weight: 700;")
+        self.home_upsnap_card._home_detail_label.setText(upsnap_detail)
 
     # ── Log ────────────────────────────────────────────────────────────────
 
@@ -2910,6 +2985,7 @@ class VPNApp(QMainWindow):
 
         # Auto-Login bei UpSnap
         QTimer.singleShot(500, lambda: self.sig.auto_login_signal.emit())
+        self._refresh_home_dashboard()
 
     def _disconnected(self):
         self._set_status("Getrennt", C["red"])
@@ -2942,6 +3018,7 @@ class VPNApp(QMainWindow):
             duration = int(time.time() - self._session_start_time)
             self._add_history_entry(self._session_config_name, self._session_start_time, duration)
             self._session_start_time = 0
+        self._refresh_home_dashboard()
 
         # Toast
         self._notify("VPN getrennt", "Verbindung wurde beendet.")
@@ -3513,6 +3590,7 @@ class VPNApp(QMainWindow):
     def _mark_upsnap_logged_out(self):
         self.upsnap_auth_label.setText("Nicht angemeldet")
         self.upsnap_auth_label.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; font-weight: 600;")
+        self._refresh_home_dashboard()
 
     def _on_logged_in(self):
         """UI nach erfolgreichem Login umschalten."""
@@ -3520,6 +3598,7 @@ class VPNApp(QMainWindow):
         self.btn_login.setEnabled(True)
         self.upsnap_auth_label.setText("Angemeldet")
         self.upsnap_auth_label.setStyleSheet(f"color: {C['green']}; font-size: 9pt; font-weight: 600;")
+        self._refresh_home_dashboard()
 
     def _on_logout(self):
         """Abmelden und UI zurücksetzen."""
@@ -3541,6 +3620,7 @@ class VPNApp(QMainWindow):
         self.btn_login.setEnabled(bool(TARGET_IP))
         self._mark_upsnap_logged_out()
         log("UpSnap abgemeldet.")
+        self._refresh_home_dashboard()
 
     # ── Device-Anzeige ─────────────────────────────────────────────────────
 
@@ -3990,6 +4070,7 @@ class VPNApp(QMainWindow):
             h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
             self.duration_label.setText(f"{h:02d}:{m:02d}:{s:02d}")
             self.duration_label.setStyleSheet(f"color: {C['green']};")
+            self._refresh_home_dashboard()
 
     # ── Ping ──────────────────────────────────────────────────────────────
 
@@ -4060,6 +4141,7 @@ class VPNApp(QMainWindow):
                     self.ping_label.setStyleSheet(f"color: {C['orange']};")
             except ValueError:
                 self.ping_label.setStyleSheet(f"color: {C['dim']};")
+        self._refresh_home_dashboard()
 
     # ── Transfer-Stats ─────────────────────────────────────────────────────
 
@@ -4113,6 +4195,7 @@ class VPNApp(QMainWindow):
         """Transfer-Stats Label aktualisieren (Main-Thread)."""
         self.transfer_label.setText(text)
         self.transfer_label.show()
+        self._refresh_home_dashboard()
 
     # ── Zeitplan ────────────────────────────────────────────────────────────
 
