@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.13"
+APP_VERSION = "4.0.14"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -1807,33 +1807,56 @@ class VPNApp(QMainWindow):
         main_tab_layout.setContentsMargins(12, 10, 12, 12)
         main_tab_layout.setSpacing(10)
 
-        home_header = QHBoxLayout()
-        home_header.setContentsMargins(0, 0, 0, 2)
-        home_header.setSpacing(10)
+        home_hero = QFrame()
+        home_hero.setObjectName("homeHero")
+        home_hero.setStyleSheet(f"""
+            QFrame#homeHero {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 {C['card']}, stop:1 {C['surface']});
+                border: 1px solid {C['border']};
+                border-radius: 12px;
+            }}
+        """)
+        hero_shadow = QGraphicsDropShadowEffect(self)
+        hero_shadow.setBlurRadius(22)
+        hero_shadow.setColor(QColor(0, 0, 0, 90))
+        hero_shadow.setOffset(0, 6)
+        home_hero.setGraphicsEffect(hero_shadow)
+        hero_layout = QHBoxLayout(home_hero)
+        hero_layout.setContentsMargins(18, 14, 18, 14)
+        hero_layout.setSpacing(12)
 
         home_title_box = QVBoxLayout()
-        home_title_box.setSpacing(1)
+        home_title_box.setSpacing(2)
+        home_badge = QLabel("Modularer Dashboard-Start")
+        home_badge.setStyleSheet(f"color: {C['accent']}; font-size: 8.5pt; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase;")
         home_title = QLabel("Startseite")
-        home_title.setFont(QFont("Segoe UI Variable Text", 13, QFont.Weight.DemiBold))
+        home_title.setFont(QFont("Segoe UI Variable Text", 15, QFont.Weight.DemiBold))
         home_title.setStyleSheet(f"color: {C['fg']};")
-        home_subtitle = QLabel("Deine wichtigsten Module auf einen Blick")
+        home_subtitle = QLabel("Die wichtigsten Funktionen als anpassbare Module statt als unuebersichtliche Kacheln.")
+        home_subtitle.setWordWrap(True)
         home_subtitle.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        home_title_box.addWidget(home_badge)
         home_title_box.addWidget(home_title)
         home_title_box.addWidget(home_subtitle)
-        home_header.addLayout(home_title_box)
-        home_header.addStretch()
+        hero_layout.addLayout(home_title_box, 2)
 
-        self.btn_customize_home = _make_btn("Startseite anpassen", C["surface"], C["fg"], C["surface_h"])
-        self.btn_customize_home.setToolTip("Module ein-/ausblenden und sortieren")
-        self.btn_customize_home.clicked.connect(self._show_home_customize_dialog)
-        home_header.addWidget(self.btn_customize_home)
+        hero_actions = QVBoxLayout()
+        hero_actions.setSpacing(8)
+        self.btn_quick_login = _make_btn("UpSnap per Popup", C["accent"], "#000000", C["accent_h"])
+        self.btn_quick_login.setToolTip("UpSnap Login als Popup öffnen")
+        self.btn_quick_login.clicked.connect(lambda checked=False: self._on_upsnap_login(show_dialog=True))
+        hero_actions.addWidget(self.btn_quick_login)
+        hero_layout.addLayout(hero_actions)
 
-        main_tab_layout.addLayout(home_header)
+        main_tab_layout.addWidget(home_hero)
 
-        self.home_modules_layout = QVBoxLayout()
+        self.home_modules_container = QWidget()
+        self.home_modules_layout = QGridLayout(self.home_modules_container)
         self.home_modules_layout.setContentsMargins(0, 0, 0, 0)
-        self.home_modules_layout.setSpacing(10)
-        main_tab_layout.addLayout(self.home_modules_layout)
+        self.home_modules_layout.setHorizontalSpacing(10)
+        self.home_modules_layout.setVerticalSpacing(10)
+        main_tab_layout.addWidget(self.home_modules_container)
 
         # ── Verbindungs-Status-Bar ──
         status_bar = QFrame()
@@ -1902,18 +1925,6 @@ class VPNApp(QMainWindow):
         sb_layout.addWidget(self.transfer_label)
 
         sb_layout.addStretch()
-
-        # Update-Button (initial versteckt) – rechts in der Statusbar
-        self.btn_update = _make_btn("\u2b06 Update", C["green"], "#000000", "#8fdf81")
-        self.btn_update.clicked.connect(self._on_update)
-        self.btn_update.hide()
-        sb_layout.addWidget(self.btn_update)
-
-        # Settings-Button (Zahnrad) – rechts in der Statusbar
-        self.btn_settings_shortcut = _make_btn("⚙", C["surface"], C["fg"], C["surface_h"])
-        self.btn_settings_shortcut.setToolTip("Einstellungen öffnen")
-        self.btn_settings_shortcut.clicked.connect(lambda: tabs.setCurrentIndex(1))
-        sb_layout.addWidget(self.btn_settings_shortcut)
 
         self.status_module = status_bar
 
@@ -2046,7 +2057,7 @@ class VPNApp(QMainWindow):
 
         self.btn_login = _make_btn("Anmelden", C["accent"], "#000000", C["accent_h"])
         self.btn_login.setToolTip("UpSnap Login als Popup öffnen")
-        self.btn_login.clicked.connect(self._on_upsnap_login)
+        self.btn_login.clicked.connect(lambda checked=False: self._on_upsnap_login(show_dialog=True))
         auth_layout.addWidget(self.btn_login)
 
         snap_layout.addWidget(auth_bar)
@@ -2288,9 +2299,25 @@ class VPNApp(QMainWindow):
         self.btn_update_settings.clicked.connect(self._on_update)
         self.btn_update_settings.hide()
         support_row.addWidget(self.btn_update_settings)
+        self.btn_update = self.btn_update_settings
         
         support_row.addStretch()
         debug_vbox.addLayout(support_row)
+
+        debug_vbox.addWidget(self._hline())
+
+        debug_vbox.addWidget(self._sub_section_label("Startseite"))
+        home_settings_row = QHBoxLayout()
+        home_settings_row.setSpacing(10)
+        home_settings_hint = QLabel("Module ein-/ausblenden, sortieren und die Startseite modular halten.")
+        home_settings_hint.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        home_settings_hint.setWordWrap(True)
+        home_settings_row.addWidget(home_settings_hint, 1)
+        self.btn_customize_home = _make_btn("Startseite anpassen", C["surface"], C["fg"], C["surface_h"])
+        self.btn_customize_home.setToolTip("Module ein-/ausblenden und sortieren")
+        self.btn_customize_home.clicked.connect(self._show_home_customize_dialog)
+        home_settings_row.addWidget(self.btn_customize_home)
+        debug_vbox.addLayout(home_settings_row)
 
         debug_vbox.addWidget(self._hline())
 
@@ -2365,16 +2392,24 @@ class VPNApp(QMainWindow):
             else:
                 widget.deleteLater()
 
-        any_visible = False
-        for key in self._home_module_order:
-            if not self._home_module_visibility.get(key, True):
-                continue
-            widget = self._home_modules.get(key)
-            if not widget:
-                continue
-            widget.show()
-            self.home_modules_layout.addWidget(widget)
-            any_visible = True
+        visible_keys = [key for key in self._home_module_order if self._home_module_visibility.get(key, True)]
+        any_visible = bool(visible_keys)
+        if any_visible:
+            row = 0
+            if "status" in visible_keys:
+                widget = self._home_modules.get("status")
+                if widget:
+                    widget.show()
+                    self.home_modules_layout.addWidget(widget, row, 0, 1, 2)
+                    row += 1
+
+            remaining_keys = [key for key in visible_keys if key != "status"]
+            for index, key in enumerate(remaining_keys):
+                widget = self._home_modules.get(key)
+                if not widget:
+                    continue
+                widget.show()
+                self.home_modules_layout.addWidget(widget, row + (index // 2), index % 2)
 
         if not any_visible:
             empty = QLabel("Keine Module aktiv. Startseite anpassen, um Module einzublenden.")
