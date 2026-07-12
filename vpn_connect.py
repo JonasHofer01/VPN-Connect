@@ -23,7 +23,7 @@ import ctypes.wintypes as wt
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QLineEdit, QListWidget, QFrame,
+    QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QFrame,
     QScrollArea, QTextEdit, QMessageBox, QSystemTrayIcon, QMenu,
     QCheckBox, QDialog, QFormLayout, QDialogButtonBox, QComboBox,
     QTabWidget, QSizePolicy, QGridLayout, QGraphicsDropShadowEffect
@@ -39,7 +39,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.12"
+APP_VERSION = "4.0.13"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -1114,19 +1114,19 @@ def _cleanup_old_exe():
 
 C = {
     # Hintergründe (Layering) – tiefer Blauton mit Kontrast
-    "bg":        "#0f172a",
-    "card":      "#111827",
-    "surface":   "#1f2937",
-    "surface_h": "#253248",
+    "bg":        "#101214",
+    "card":      "#171a1f",
+    "surface":   "#22262d",
+    "surface_h": "#2c323a",
     # Rahmen
-    "border":    "#233043",
-    "border_l":  "#2f3f55",
+    "border":    "#303640",
+    "border_l":  "#49515d",
     # Text
-    "fg":        "#e5ecf5",
-    "dim":       "#94a3b8",
+    "fg":        "#f3f6f8",
+    "dim":       "#a8b0ba",
     # Akzent (Cyan/Teal)
-    "accent":    "#22d3ee",
-    "accent_h":  "#67e8f9",
+    "accent":    "#2dd4bf",
+    "accent_h":  "#5eead4",
     # Semantische Farben
     "green":     "#34d399",
     "red":       "#f87171",
@@ -1415,7 +1415,7 @@ QCheckBox::indicator:checked:hover {{
 /* Tabs */
 QTabWidget::pane {{
     border: 1px solid {C['border']};
-    border-radius: 12px;
+    border-radius: 8px;
     top: -1px;
     background: {C['bg']};
 }}
@@ -1592,8 +1592,8 @@ class VPNApp(QMainWindow):
         super().__init__()
         self.setWindowIcon(get_app_icon())
         self.setWindowTitle(f"VPN Connect  v{APP_VERSION}")
-        self.setMinimumSize(800, 520)
-        self.resize(800, 560)
+        self.setMinimumSize(880, 560)
+        self.resize(940, 640)
         self.setToolTip(
             "Tastaturkuerzel:\n"
             "  Strg+K   Verbinden\n"
@@ -1638,6 +1638,15 @@ class VPNApp(QMainWindow):
         self._devices_hash: str = ""           # Hash der Geräteliste (Smart-Refresh)
         self._active_ops: set = set()          # Device-IDs mit laufenden Operationen
         self._refresh_in_progress: bool = False  # verhindert parallele API-Aufrufe
+        self._remember_upsnap_credentials: bool = True
+        self._home_module_order: List[str] = ["status", "vpn", "upsnap"]
+        self._home_module_visibility: dict = {
+            "status": True,
+            "vpn": True,
+            "upsnap": True,
+        }
+        self._home_modules: dict = {}
+        self._home_module_titles: dict = {}
 
         # Debounce-Timer für Settings (verhindert zu häufiges Schreiben bei schnellen Änderungen)
         self._save_timer = QTimer(self)
@@ -1702,7 +1711,7 @@ class VPNApp(QMainWindow):
         self.sig.cancel_done_signal.connect(lambda: self.btn_cancel.hide())
         self.sig.show_devices_signal.connect(self._show_devices)
         self.sig.enable_login_signal.connect(
-            lambda: self.btn_login.setEnabled(True))
+            lambda: (self.btn_login.setEnabled(True), self._mark_upsnap_logged_out()))
         self.sig.logged_in_signal.connect(self._on_logged_in)
         self.sig.update_available_signal.connect(self._show_update_btn)
         self.sig.update_progress_signal.connect(
@@ -1748,11 +1757,11 @@ class VPNApp(QMainWindow):
 
         title = QLabel("VPN Connect")
         title.setFont(QFont("Segoe UI Variable Display", 18, QFont.Weight.DemiBold))
-        title.setStyleSheet(f"color: {C['fg']}; letter-spacing: -0.5px;")
+        title.setStyleSheet(f"color: {C['fg']}; letter-spacing: 0px;")
         hdr.addWidget(title)
 
         subtitle = QLabel("WireGuard · UpSnap · RDP")
-        subtitle.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; letter-spacing: 0.2px;")
+        subtitle.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; letter-spacing: 0px;")
         hdr.addWidget(subtitle)
         hdr.setSpacing(10)
         hdr.addStretch()
@@ -1765,7 +1774,7 @@ class VPNApp(QMainWindow):
         tabs.setStyleSheet(f"""
             QTabWidget::pane {{
                 border: 1px solid {C['border']};
-                border-radius: 12px;
+                border-radius: 8px;
                 background: {C['bg']};
             }}
             QTabBar::tab {{
@@ -1792,11 +1801,39 @@ class VPNApp(QMainWindow):
         """)
         main_layout.addWidget(tabs)
 
-        # Haupt-Tab
+        # Startseite
         main_tab = QWidget()
         main_tab_layout = QVBoxLayout(main_tab)
-        main_tab_layout.setContentsMargins(10, 8, 10, 8)
-        main_tab_layout.setSpacing(6)
+        main_tab_layout.setContentsMargins(12, 10, 12, 12)
+        main_tab_layout.setSpacing(10)
+
+        home_header = QHBoxLayout()
+        home_header.setContentsMargins(0, 0, 0, 2)
+        home_header.setSpacing(10)
+
+        home_title_box = QVBoxLayout()
+        home_title_box.setSpacing(1)
+        home_title = QLabel("Startseite")
+        home_title.setFont(QFont("Segoe UI Variable Text", 13, QFont.Weight.DemiBold))
+        home_title.setStyleSheet(f"color: {C['fg']};")
+        home_subtitle = QLabel("Deine wichtigsten Module auf einen Blick")
+        home_subtitle.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        home_title_box.addWidget(home_title)
+        home_title_box.addWidget(home_subtitle)
+        home_header.addLayout(home_title_box)
+        home_header.addStretch()
+
+        self.btn_customize_home = _make_btn("Startseite anpassen", C["surface"], C["fg"], C["surface_h"])
+        self.btn_customize_home.setToolTip("Module ein-/ausblenden und sortieren")
+        self.btn_customize_home.clicked.connect(self._show_home_customize_dialog)
+        home_header.addWidget(self.btn_customize_home)
+
+        main_tab_layout.addLayout(home_header)
+
+        self.home_modules_layout = QVBoxLayout()
+        self.home_modules_layout.setContentsMargins(0, 0, 0, 0)
+        self.home_modules_layout.setSpacing(10)
+        main_tab_layout.addLayout(self.home_modules_layout)
 
         # ── Verbindungs-Status-Bar ──
         status_bar = QFrame()
@@ -1805,7 +1842,7 @@ class VPNApp(QMainWindow):
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 {C['card']}, stop:1 {C['surface']});
                 border: 1px solid {C['border']};
-                border-radius: 12px;
+                border-radius: 8px;
             }}
         """)
         shadow_sb = QGraphicsDropShadowEffect(self)
@@ -1878,7 +1915,7 @@ class VPNApp(QMainWindow):
         self.btn_settings_shortcut.clicked.connect(lambda: tabs.setCurrentIndex(1))
         sb_layout.addWidget(self.btn_settings_shortcut)
 
-        main_tab_layout.addWidget(status_bar)
+        self.status_module = status_bar
 
         # ── WireGuard ──
         wg_card = QFrame()
@@ -1886,7 +1923,7 @@ class VPNApp(QMainWindow):
             QFrame {{
                 background-color: {C['card']};
                 border: 1px solid {C['border']};
-                border-radius: 12px;
+                border-radius: 8px;
             }}
         """)
         shadow_wg = QGraphicsDropShadowEffect(self)
@@ -1941,7 +1978,7 @@ class VPNApp(QMainWindow):
         btn_row.addStretch()
         wg_layout.addLayout(btn_row)
 
-        main_tab_layout.addWidget(wg_card)
+        self.vpn_module = wg_card
 
         # ── UpSnap / Wake on LAN ──
         snap_card = QFrame()
@@ -1949,7 +1986,7 @@ class VPNApp(QMainWindow):
             QFrame {{
                 background-color: {C['card']};
                 border: 1px solid {C['border']};
-                border-radius: 12px;
+                border-radius: 8px;
             }}
         """)
         shadow_snap = QGraphicsDropShadowEffect(self)
@@ -1976,36 +2013,43 @@ class VPNApp(QMainWindow):
         snap_hdr.addWidget(self.device_info_label)
         snap_layout.addLayout(snap_hdr)
 
-        # Login-Bereich (Formular-Struktur)
-        login_grid = QGridLayout()
-        login_grid.setSpacing(10)
-        login_grid.setContentsMargins(0, 4, 0, 4)
-
-        self.lbl_email = QLabel("E-Mail-Adresse")
-        self.lbl_email.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; font-weight: bold;")
-        self.entry_user = QLineEdit()
-        self.entry_user.setPlaceholderText("E-Mail-Adresse eingeben")
-        self.entry_user.returnPressed.connect(lambda: self.entry_pass.setFocus())
+        # Login-Daten bleiben intern erhalten; Eingabe passiert im Popup.
+        self.lbl_email = QLabel("", self)
+        self.lbl_email.hide()
+        self.lbl_pw = QLabel("", self)
+        self.lbl_pw.hide()
+        self.entry_user = QLineEdit(self)
+        self.entry_user.hide()
         self.entry_user.editingFinished.connect(lambda: self._schedule_save())
-
-        self.lbl_pw = QLabel("Passwort")
-        self.lbl_pw.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; font-weight: bold;")
-        self.entry_pass = QLineEdit()
-        self.entry_pass.setPlaceholderText("Passwort eingeben")
+        self.entry_pass = QLineEdit(self)
         self.entry_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self.entry_pass.returnPressed.connect(self._on_upsnap_login)
+        self.entry_pass.hide()
         self.entry_pass.editingFinished.connect(lambda: self._schedule_save())
 
+        auth_bar = QFrame()
+        auth_bar.setObjectName("upsnapAuthBar")
+        auth_bar.setStyleSheet(f"""
+            QFrame#upsnapAuthBar {{
+                background-color: {C['surface']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        auth_layout = QHBoxLayout(auth_bar)
+        auth_layout.setContentsMargins(12, 8, 10, 8)
+        auth_layout.setSpacing(10)
+
+        self.upsnap_auth_label = QLabel("Nicht angemeldet")
+        self.upsnap_auth_label.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; font-weight: 600;")
+        auth_layout.addWidget(self.upsnap_auth_label)
+        auth_layout.addStretch()
+
         self.btn_login = _make_btn("Anmelden", C["accent"], "#000000", C["accent_h"])
+        self.btn_login.setToolTip("UpSnap Login als Popup öffnen")
         self.btn_login.clicked.connect(self._on_upsnap_login)
+        auth_layout.addWidget(self.btn_login)
 
-        login_grid.addWidget(self.lbl_email, 0, 0)
-        login_grid.addWidget(self.entry_user, 0, 1)
-        login_grid.addWidget(self.lbl_pw, 1, 0)
-        login_grid.addWidget(self.entry_pass, 1, 1)
-        login_grid.addWidget(self.btn_login, 2, 1, 1, 1, Qt.AlignmentFlag.AlignLeft)
-
-        snap_layout.addLayout(login_grid)
+        snap_layout.addWidget(auth_bar)
 
         # Separator
         sep = QFrame()
@@ -2022,7 +2066,18 @@ class VPNApp(QMainWindow):
         self.device_frame.addWidget(self.upsnap_hint)
         snap_layout.addLayout(self.device_frame)
 
-        main_tab_layout.addWidget(snap_card)
+        self.upsnap_module = snap_card
+        self._home_modules = {
+            "status": self.status_module,
+            "vpn": self.vpn_module,
+            "upsnap": self.upsnap_module,
+        }
+        self._home_module_titles = {
+            "status": "Verbindungsstatus",
+            "vpn": "WireGuard",
+            "upsnap": "UpSnap / Wake on LAN",
+        }
+        self._apply_home_modules()
         main_tab_layout.addStretch()
 
         # Einstellungen-Tab
@@ -2273,7 +2328,7 @@ class VPNApp(QMainWindow):
 
         settings_layout.addStretch()
 
-        tabs.addTab(main_tab, "🏠 Haupt")
+        tabs.addTab(main_tab, "Startseite")
         tabs.addTab(settings_scroll, "⚙ Einstellungen")
 
         # ── Tastaturkürzel ──
@@ -2283,6 +2338,167 @@ class VPNApp(QMainWindow):
             lambda: self._on_disconnect() if self.vpn_connected else None)
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._toggle_log)
         QShortcut(QKeySequence("Ctrl+H"), self).activated.connect(self._toggle_history)
+
+    def _normalize_home_modules(self):
+        available = list(self._home_modules.keys())
+        order = [key for key in self._home_module_order if key in available]
+        for key in available:
+            if key not in order:
+                order.append(key)
+        self._home_module_order = order
+        for key in available:
+            self._home_module_visibility.setdefault(key, True)
+
+    def _apply_home_modules(self):
+        if not hasattr(self, "home_modules_layout"):
+            return
+        self._normalize_home_modules()
+        module_widgets = list(self._home_modules.values())
+
+        while self.home_modules_layout.count():
+            item = self.home_modules_layout.takeAt(0)
+            widget = item.widget()
+            if not widget:
+                continue
+            if any(widget is module for module in module_widgets):
+                widget.setParent(None)
+            else:
+                widget.deleteLater()
+
+        any_visible = False
+        for key in self._home_module_order:
+            if not self._home_module_visibility.get(key, True):
+                continue
+            widget = self._home_modules.get(key)
+            if not widget:
+                continue
+            widget.show()
+            self.home_modules_layout.addWidget(widget)
+            any_visible = True
+
+        if not any_visible:
+            empty = QLabel("Keine Module aktiv. Startseite anpassen, um Module einzublenden.")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet(f"""
+                color: {C['dim']};
+                background-color: {C['card']};
+                border: 1px dashed {C['border_l']};
+                border-radius: 8px;
+                padding: 22px;
+            """)
+            self.home_modules_layout.addWidget(empty)
+
+    def _show_home_customize_dialog(self):
+        self._normalize_home_modules()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Startseite anpassen")
+        dlg.setMinimumWidth(440)
+        dlg.setStyleSheet(f"background-color: {C['card']}; color: {C['fg']};")
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("Module")
+        title.setFont(QFont("Segoe UI Variable Text", 12, QFont.Weight.DemiBold))
+        title.setStyleSheet(f"color: {C['fg']};")
+        layout.addWidget(title)
+
+        module_list = QListWidget()
+        module_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        module_list.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {C['surface']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+                padding: 4px;
+            }}
+            QListWidget::item {{
+                min-height: 30px;
+                padding: 5px 8px;
+            }}
+        """)
+        for key in self._home_module_order:
+            item = QListWidgetItem(self._home_module_titles.get(key, key))
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if self._home_module_visibility.get(key, True)
+                else Qt.CheckState.Unchecked
+            )
+            module_list.addItem(item)
+        if module_list.count():
+            module_list.setCurrentRow(0)
+        layout.addWidget(module_list)
+
+        move_row = QHBoxLayout()
+        move_row.setSpacing(8)
+        btn_up = _make_btn("Nach oben", C["surface"], C["fg"], C["surface_h"])
+        btn_down = _make_btn("Nach unten", C["surface"], C["fg"], C["surface_h"])
+        btn_reset = _make_btn("Zuruecksetzen", C["surface"], C["fg"], C["surface_h"])
+        move_row.addWidget(btn_up)
+        move_row.addWidget(btn_down)
+        move_row.addStretch()
+        move_row.addWidget(btn_reset)
+        layout.addLayout(move_row)
+
+        def move_current(delta: int):
+            row = module_list.currentRow()
+            new_row = row + delta
+            if row < 0 or new_row < 0 or new_row >= module_list.count():
+                return
+            item = module_list.takeItem(row)
+            module_list.insertItem(new_row, item)
+            module_list.setCurrentRow(new_row)
+
+        def reset_modules():
+            module_list.clear()
+            defaults = ["status", "vpn", "upsnap"]
+            for key in defaults:
+                if key not in self._home_modules:
+                    continue
+                item = QListWidgetItem(self._home_module_titles.get(key, key))
+                item.setData(Qt.ItemDataRole.UserRole, key)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked)
+                module_list.addItem(item)
+            if module_list.count():
+                module_list.setCurrentRow(0)
+
+        btn_up.clicked.connect(lambda: move_current(-1))
+        btn_down.clicked.connect(lambda: move_current(1))
+        btn_reset.clicked.connect(reset_modules)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Uebernehmen")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Abbrechen")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setStyleSheet(
+            f"background: {C['accent']}; color: #000; border-radius: 6px; padding: 7px 14px;")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setStyleSheet(
+            f"background: {C['surface']}; color: {C['fg']}; border-radius: 6px; padding: 7px 14px;")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        order: List[str] = []
+        visibility = {}
+        for i in range(module_list.count()):
+            item = module_list.item(i)
+            key = item.data(Qt.ItemDataRole.UserRole)
+            if not key:
+                continue
+            order.append(key)
+            visibility[key] = item.checkState() == Qt.CheckState.Checked
+        self._home_module_order = order
+        self._home_module_visibility = visibility
+        self._apply_home_modules()
+        self._schedule_save()
 
     # ── Win11 UI-Helfer ────────────────────────────────────────────────────
 
@@ -2793,7 +3009,10 @@ class VPNApp(QMainWindow):
         self._save_timer.stop()  # sofort, wenn explizit aufgerufen
         u = self.entry_user.text().strip()
         p = self.entry_pass.text().strip()
-        enc_pw = _dpapi_protect(p)
+        save_upsnap_credentials = self._remember_upsnap_credentials
+        stored_user = u if save_upsnap_credentials else ""
+        stored_pw = p if save_upsnap_credentials else ""
+        enc_pw = _dpapi_protect(stored_pw)
         # RDP-Passwoerter: aus Base64 decodieren, dann DPAPI sichern
         rdp_pw_enc: dict = {}
         rdp_pw_fallback: dict = {}
@@ -2819,10 +3038,13 @@ class VPNApp(QMainWindow):
             data = self._read_settings_file()
             data.update({
                 "v": 2,
-                "user": u,
+                "user": stored_user,
                 "pw_enc": enc_pw,
-                "pw_b64": base64.b64encode(p.encode("utf-8")).decode("ascii") if p else "",
+                "pw_b64": base64.b64encode(stored_pw.encode("utf-8")).decode("ascii") if stored_pw else "",
+                "remember_upsnap_credentials": save_upsnap_credentials,
                 "accent_color": self.accent_color_pref,
+                "home_module_order": self._home_module_order,
+                "home_module_visibility": self._home_module_visibility,
                 "last_config": self.config_listbox.currentRow(),
                 "auto_reconnect": self.chk_auto_reconnect.isChecked(),
                 "auto_connect": self.chk_auto_connect.isChecked(),
@@ -2877,6 +3099,7 @@ class VPNApp(QMainWindow):
         try:
             d = self._read_settings_file()
             if d:
+                self._remember_upsnap_credentials = d.get("remember_upsnap_credentials", True)
                 self.entry_user.setText(d.get("user", ""))
 
                 # Passwort: bevorzugt DPAPI, sonst Base64, sonst Plaintext
@@ -2925,6 +3148,16 @@ class VPNApp(QMainWindow):
                 self.accent_color_pref = d.get("accent_color", C["accent"])
                 for h, b in self.color_group:
                     b.setChecked(h == self.accent_color_pref)
+
+                saved_home_order = d.get("home_module_order", [])
+                if isinstance(saved_home_order, list):
+                    self._home_module_order = [key for key in saved_home_order if isinstance(key, str)]
+                saved_home_visibility = d.get("home_module_visibility", {})
+                if isinstance(saved_home_visibility, dict):
+                    self._home_module_visibility.update(
+                        {key: bool(value) for key, value in saved_home_visibility.items() if isinstance(key, str)}
+                    )
+                self._apply_home_modules()
 
                 # Server IP + Port laden und anwenden
                 saved_ip = d.get("target_ip", "")
@@ -3104,7 +3337,7 @@ class VPNApp(QMainWindow):
             self.btn_browser.setEnabled(
                 self.vpn_connected and bool(TARGET_IP))
         if hasattr(self, 'btn_login'):
-            self.btn_login.setEnabled(bool(TARGET_IP) and (self.upsnap is None))
+            self.btn_login.setEnabled(bool(TARGET_IP) or (self.upsnap is not None))
         if save:
             self._save_settings()
 
@@ -3146,27 +3379,97 @@ class VPNApp(QMainWindow):
 
     # ── UpSnap Login ───────────────────────────────────────────────────────
 
-    def _on_upsnap_login(self):
-        # Wenn bereits angemeldet → Abmelden
+    def _on_upsnap_login(self, show_dialog: bool = True):
+        # Wenn bereits angemeldet -> Abmelden
         if self.upsnap is not None:
             self._on_logout()
             return
 
         if not TARGET_IP:
-            QMessageBox.warning(self, "UpSnap",
-                                "Bitte IP/Hostname unter 'Server / Ziel' angeben.")
+            if show_dialog:
+                QMessageBox.warning(self, "UpSnap",
+                                    "Bitte IP/Hostname unter 'Server / Ziel' angeben.")
+            else:
+                log("UpSnap Auto-Login uebersprungen: kein Server / Ziel gesetzt.", "warning")
+            return
+
+        if show_dialog and not self._show_upsnap_login_dialog():
             return
 
         u = self.entry_user.text().strip()
         p = self.entry_pass.text().strip()
         if not u or not p:
-            QMessageBox.information(self, "UpSnap", "E-Mail und Passwort eingeben.")
+            if show_dialog:
+                QMessageBox.information(self, "UpSnap", "E-Mail und Passwort eingeben.")
             return
+
+        self._login_upsnap(u, p)
+
+    def _show_upsnap_login_dialog(self) -> bool:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("UpSnap anmelden")
+        dlg.setMinimumWidth(420)
+        dlg.setStyleSheet(f"background-color: {C['card']}; color: {C['fg']};")
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("UpSnap Login")
+        title.setFont(QFont("Segoe UI Variable Text", 12, QFont.Weight.DemiBold))
+        title.setStyleSheet(f"color: {C['fg']};")
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+        form.setSpacing(10)
+
+        user_edit = QLineEdit(self.entry_user.text().strip())
+        user_edit.setPlaceholderText("E-Mail-Adresse")
+        pass_edit = QLineEdit(self.entry_pass.text())
+        pass_edit.setPlaceholderText("Passwort")
+        pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        user_edit.returnPressed.connect(lambda: pass_edit.setFocus())
+        pass_edit.returnPressed.connect(dlg.accept)
+        form.addRow("E-Mail", user_edit)
+        form.addRow("Passwort", pass_edit)
+        layout.addLayout(form)
+
+        remember = QCheckBox("Zugangsdaten merken")
+        remember.setChecked(self._remember_upsnap_credentials)
+        remember.setStyleSheet(f"color: {C['dim']}; font-size: 9pt;")
+        layout.addWidget(remember)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Anmelden")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Abbrechen")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setStyleSheet(
+            f"background: {C['accent']}; color: #000; border-radius: 6px; padding: 7px 14px;")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setStyleSheet(
+            f"background: {C['surface']}; color: {C['fg']}; border-radius: 6px; padding: 7px 14px;")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+
+        self.entry_user.setText(user_edit.text().strip())
+        self.entry_pass.setText(pass_edit.text())
+        self._remember_upsnap_credentials = remember.isChecked()
+        self._schedule_save()
+        return True
+
+    def _login_upsnap(self, user: str, password: str):
         self.btn_login.setEnabled(False)
+        self.upsnap_auth_label.setText("Melde an...")
+        self.upsnap_auth_label.setStyleSheet(f"color: {C['yellow']}; font-size: 9pt; font-weight: 600;")
 
         def work():
             try:
-                c = UpSnapClient(f"http://{TARGET_IP}:{TARGET_PORT}", u, p)
+                c = UpSnapClient(f"http://{TARGET_IP}:{TARGET_PORT}", user, password)
                 if c.token:
                     self.upsnap = c
                     devs = c.get_devices()
@@ -3182,14 +3485,16 @@ class VPNApp(QMainWindow):
                 self.sig.enable_login_signal.emit()
         threading.Thread(target=work, daemon=True).start()
 
+    def _mark_upsnap_logged_out(self):
+        self.upsnap_auth_label.setText("Nicht angemeldet")
+        self.upsnap_auth_label.setStyleSheet(f"color: {C['dim']}; font-size: 9pt; font-weight: 600;")
+
     def _on_logged_in(self):
         """UI nach erfolgreichem Login umschalten."""
         self.btn_login.setText("Abmelden")
         self.btn_login.setEnabled(True)
-        self.lbl_email.hide()
-        self.entry_user.hide()
-        self.lbl_pw.hide()
-        self.entry_pass.hide()
+        self.upsnap_auth_label.setText("Angemeldet")
+        self.upsnap_auth_label.setStyleSheet(f"color: {C['green']}; font-size: 9pt; font-weight: 600;")
 
     def _on_logout(self):
         """Abmelden und UI zurücksetzen."""
@@ -3208,10 +3513,8 @@ class VPNApp(QMainWindow):
 
         # UI zurücksetzen
         self.btn_login.setText("Anmelden")
-        self.lbl_email.show()
-        self.entry_user.show()
-        self.lbl_pw.show()
-        self.entry_pass.show()
+        self.btn_login.setEnabled(bool(TARGET_IP))
+        self._mark_upsnap_logged_out()
         log("UpSnap abgemeldet.")
 
     # ── Device-Anzeige ─────────────────────────────────────────────────────
@@ -3835,7 +4138,7 @@ class VPNApp(QMainWindow):
         p = self.entry_pass.text().strip()
         if u and p and self.vpn_connected:
             log("Auto-Login bei UpSnap...")
-            self._on_upsnap_login()
+            self._on_upsnap_login(show_dialog=False)
 
     # ── Auto-Reconnect / Watchdog ─────────────────────────────────────────
 
