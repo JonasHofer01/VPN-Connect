@@ -2,7 +2,7 @@
 ; Inno Setup Script für VPN Connect
 
 #ifndef AppVersion
-  #define AppVersion "4.0.16"
+  #define AppVersion "4.0.17"
 #endif
 
 [Setup]

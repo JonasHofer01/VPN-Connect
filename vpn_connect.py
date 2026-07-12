@@ -40,7 +40,7 @@ from PyQt6.QtGui import QKeySequence, QShortcut
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.16"
+APP_VERSION = "4.0.17"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -1528,20 +1528,12 @@ class DotWidget(QWidget):
 
 
 class HomeModuleList(QListWidget):
-    orderChanged = pyqtSignal()
-
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-
-    def dropEvent(self, event):
-        super().dropEvent(event)
-        self.orderChanged.emit()
+        self.setDragEnabled(False)
+        self.setAcceptDrops(False)
+        self.setDropIndicatorShown(False)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
 
 
 def _make_btn(text: str, bg: str, fg: str, hover: str,
@@ -1860,7 +1852,6 @@ class VPNApp(QMainWindow):
                 margin: 0px;
             }}
         """)
-        self.home_modules_list.orderChanged.connect(self._on_home_module_order_changed)
         main_tab_layout.addWidget(self.home_modules_list)
 
         # ── Verbindungs-Status-Bar ──
@@ -2431,17 +2422,6 @@ class VPNApp(QMainWindow):
             item.setSizeHint(empty.sizeHint())
             self.home_modules_list.addItem(item)
             self.home_modules_list.setItemWidget(item, empty)
-
-    def _on_home_module_order_changed(self):
-        order = []
-        for i in range(self.home_modules_list.count()):
-            item = self.home_modules_list.item(i)
-            key = item.data(Qt.ItemDataRole.UserRole)
-            if isinstance(key, str) and key in self._home_modules:
-                order.append(key)
-        if order:
-            self._home_module_order = order
-            self._schedule_save()
 
     def _show_home_customize_dialog(self):
         self._normalize_home_modules()
