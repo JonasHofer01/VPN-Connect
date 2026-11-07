@@ -61,6 +61,7 @@ jobs:
             dist/VPN_Connect_Setup.exe.sha256
 
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -69,4 +70,3 @@ jobs:
             dist/VPN_Connect_Setup.exe
             dist/VPN_Connect_Setup.exe.sha256
           generate_release_notes: true
-
