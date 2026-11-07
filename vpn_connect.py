@@ -38,7 +38,7 @@ from PyQt6.QtGui import (
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "6.0.0"
+APP_VERSION = "6.0.1"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
