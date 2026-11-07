@@ -27,20 +27,18 @@ from PyQt6.QtWidgets import (
     QScrollArea, QTextEdit, QMessageBox, QSystemTrayIcon, QMenu,
     QCheckBox, QDialog, QFormLayout, QDialogButtonBox, QComboBox,
     QTabWidget, QSizePolicy, QGridLayout, QGraphicsDropShadowEffect,
-    QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QAction, QPixmap, QIcon,
-    QPen, QBrush, QLinearGradient,
+    QPen, QBrush, QLinearGradient, QKeySequence, QShortcut,
 )
-from PyQt6.QtGui import QKeySequence, QShortcut
 
 # =============================================================================
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "4.0.20"
+APP_VERSION = "5.0.0"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -48,8 +46,6 @@ CONFIG_BASE = r"C:\Program Files\WireGuard\Data\Configurations"
 # IP und Port werden aus vpn_settings.json geladen (nicht hardcodiert)
 TARGET_IP = ""
 TARGET_PORT = 8090
-
-WG_CONFIG_CONTENT = ""
 
 # Konsole verstecken
 if sys.platform == "win32":
@@ -64,8 +60,7 @@ if sys.platform == "win32":
         if sys.stderr is None or sys.stderr.closed:
             sys.stderr = open(os.devnull, "w")
     except Exception:
-        sys.stdout = open(os.devnull, "w")
-        sys.stderr = open(os.devnull, "w")
+        pass
 
 SW_HIDE = 0
 CREATE_NO_WINDOW = 0x08000000
@@ -128,16 +123,19 @@ def log(msg: str, level: str = "info") -> None:
 
 _settings_lock = threading.Lock()
 
+if sys.platform == "win32":
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wt.DWORD),
+                    ("pbData", ctypes.POINTER(ctypes.c_byte))]
+else:
+    DATA_BLOB = None
+
 
 def _dpapi_protect(text: str) -> str:
     """Schuetzt Klartext mit Windows DPAPI und gibt Base64 zurueck."""
     if not text or sys.platform != "win32":
         return ""
     try:
-        class DATA_BLOB(ctypes.Structure):
-            _fields_ = [("cbData", wt.DWORD),
-                        ("pbData", ctypes.POINTER(ctypes.c_byte))]
-
         data = text.encode("utf-8")
         blob_in = DATA_BLOB(len(data), ctypes.cast(
             ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)))
@@ -162,10 +160,6 @@ def _dpapi_unprotect(token: str) -> str:
     if not token or sys.platform != "win32":
         return ""
     try:
-        class DATA_BLOB(ctypes.Structure):
-            _fields_ = [("cbData", wt.DWORD),
-                        ("pbData", ctypes.POINTER(ctypes.c_byte))]
-
         raw = base64.b64decode(token.encode("ascii"))
         blob_in = DATA_BLOB(len(raw), ctypes.cast(
             ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)))
@@ -315,11 +309,6 @@ def collect_all_configs() -> List[Tuple[str, str]]:
                 configs.append((f"{f}  (lokal)", os.path.join(_base_dir, f)))
     except Exception:
         pass
-    if "REPLACE_ME" not in WG_CONFIG_CONTENT and len(WG_CONFIG_CONTENT.strip()) > 10:
-        p = os.path.join(_base_dir, "embedded_tunnel.conf")
-        with open(p, "w") as fh:
-            fh.write(WG_CONFIG_CONTENT)
-        configs.append(("embedded_tunnel.conf  (eingebettet)", p))
     if os.path.exists(CONFIG_BASE):
         try:
             for f in sorted(os.listdir(CONFIG_BASE)):
@@ -388,9 +377,9 @@ def check_connection(ip: str, port: int, timeout: int = 5,
             log(f"Verbunden mit {ip}:{port}")
             return True
         except socket.timeout:
-            log(f"Timeout", "warning")
+            log("Timeout", "warning")
         except ConnectionRefusedError:
-            log(f"Abgelehnt", "warning")
+            log("Abgelehnt", "warning")
         except Exception as e:
             log(f"Fehler: {e}", "warning")
         if i < retries:
@@ -424,7 +413,6 @@ def _start_dialog_dismisser():
 
 def _dialog_dismisser_loop():
     global _dismiss_running
-    import ctypes.wintypes as wt
 
     user32   = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
@@ -1151,12 +1139,8 @@ C = {
 _APP_ICON_CACHE: Optional[QIcon] = None
 
 
-def _app_icon_path() -> str:
-    return os.path.join(_base_dir, "assets", "app_icon.ico")
-
-
 def _app_icon_paths() -> List[str]:
-    paths = [_app_icon_path()]
+    paths = [os.path.join(_base_dir, "assets", "app_icon.ico")]
     bundle_dir = getattr(sys, "_MEIPASS", "")
     if bundle_dir:
         paths.append(os.path.join(bundle_dir, "assets", "app_icon.ico"))
@@ -1538,15 +1522,6 @@ class DotWidget(QWidget):
         p.end()
 
 
-class HomeModuleList(QListWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setDragEnabled(False)
-        self.setAcceptDrops(False)
-        self.setDropIndicatorShown(False)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-
-
 def _make_btn(text: str, bg: str, fg: str, hover: str,
               parent=None) -> QPushButton:
     """Erstellt einen Win11-Fluent-styled Button."""
@@ -1597,7 +1572,6 @@ def _apply_dark_titlebar(window):
     if sys.platform != "win32":
         return
     try:
-        import ctypes
         DWMWA_USE_IMMERSIVE_DARK_MODE = 20
         set_window_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
         hwnd = int(window.winId())
@@ -1695,6 +1669,11 @@ class VPNApp(QMainWindow):
         self._watchdog_timer.setInterval(10_000)
         self._watchdog_timer.timeout.connect(self._watchdog_tick)
 
+        # Externer-Tunnel-Erkennung (polling alle 5 Sekunden)
+        self._external_tunnel_timer = QTimer(self)
+        self._external_tunnel_timer.setInterval(5_000)
+        self._external_tunnel_timer.timeout.connect(self._detect_external_tunnel)
+
         # Signale
         self.sig = AppSignals()
         self._connect_signals()
@@ -1735,8 +1714,7 @@ class VPNApp(QMainWindow):
             lambda: (self.btn_login.setEnabled(True), self._mark_upsnap_logged_out()))
         self.sig.logged_in_signal.connect(self._on_logged_in)
         self.sig.update_available_signal.connect(self._show_update_btn)
-        self.sig.update_progress_signal.connect(
-            lambda t: (self.btn_update.setText(t), self.btn_update_settings.setText(t)))
+        self.sig.update_progress_signal.connect(self.btn_update.setText)
         self.sig.update_failed_signal.connect(self._on_update_failed)
         self.sig.apply_update_signal.connect(self._apply_update)
         self.sig.update_ready_to_exit_signal.connect(self._exit_for_update)
@@ -1751,14 +1729,11 @@ class VPNApp(QMainWindow):
         self.sig.vpn_ip_signal.connect(self._update_ip_label)
         self.sig.history_updated_signal.connect(self._refresh_history_ui)
         self.sig.transfer_signal.connect(self._update_transfer_label)
-        self.sig.status_signal.connect(lambda t, c: self._update_window_title())
         self.sig.alert_signal.connect(self._on_alert)
 
     # ── Layout ─────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        pad = 24
-
         # Zentrales Widget mit Scroll-Bereich
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -2034,17 +2009,11 @@ class VPNApp(QMainWindow):
         snap_layout.addLayout(snap_hdr)
 
         # Login-Daten bleiben intern erhalten; Eingabe passiert im Popup.
-        self.lbl_email = QLabel("", self)
-        self.lbl_email.hide()
-        self.lbl_pw = QLabel("", self)
-        self.lbl_pw.hide()
         self.entry_user = QLineEdit(self)
         self.entry_user.hide()
-        self.entry_user.editingFinished.connect(lambda: self._schedule_save())
         self.entry_pass = QLineEdit(self)
         self.entry_pass.setEchoMode(QLineEdit.EchoMode.Password)
         self.entry_pass.hide()
-        self.entry_pass.editingFinished.connect(lambda: self._schedule_save())
 
         auth_bar = QFrame()
         auth_bar.setObjectName("upsnapAuthBar")
@@ -2304,11 +2273,10 @@ class VPNApp(QMainWindow):
         support_btn.clicked.connect(self._export_support)
         support_row.addWidget(support_btn)
 
-        self.btn_update_settings = _make_btn("⬇ Update suchen...", C["green"], "#000000", "#8fdf81")
-        self.btn_update_settings.clicked.connect(self._on_update)
-        self.btn_update_settings.hide()
-        support_row.addWidget(self.btn_update_settings)
-        self.btn_update = self.btn_update_settings
+        self.btn_update = _make_btn("⬇ Update suchen...", C["green"], "#000000", "#8fdf81")
+        self.btn_update.clicked.connect(self._on_update)
+        self.btn_update.hide()
+        support_row.addWidget(self.btn_update)
         
         support_row.addStretch()
         debug_vbox.addLayout(support_row)
@@ -2538,15 +2506,6 @@ class VPNApp(QMainWindow):
     # ── Win11 UI-Helfer ────────────────────────────────────────────────────
 
     @staticmethod
-    def _section_label(text: str) -> QLabel:
-        """Abschnittsüberschrift im Windows 11 Stil."""
-        lbl = QLabel(text)
-        lbl.setFont(QFont("Segoe UI Variable Text", 9, QFont.Weight.DemiBold))
-        lbl.setStyleSheet(f"color: {C['dim']}; letter-spacing: 0.3px; padding: 2px 0 0 0; margin: 0;")
-        lbl.setContentsMargins(0, 2, 0, 0)
-        return lbl
-
-    @staticmethod
     def _sub_section_label(text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setStyleSheet(f"color: {C['accent']}; font-size: 9pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px;")
@@ -2568,13 +2527,18 @@ class VPNApp(QMainWindow):
         header = QPushButton(f"▼  {icon}  {title}")
         header.setCheckable(True)
         header.setChecked(True)
-        header.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {C['surface']}; color: {C['fg']}; border: 1px solid {C['border']};
-                border-radius: 8px 8px 0px 0px; padding: 10px 15px; text-align: left; font-weight: bold; font-size: 10pt;
-            }}
-            QPushButton:hover {{ background-color: {C['surface_h']}; }}
-        """)
+
+        def _header_qss(open_state: bool) -> str:
+            radius = "8px 8px 0px 0px" if open_state else "8px"
+            return f"""
+                QPushButton {{
+                    background-color: {C['surface']}; color: {C['fg']}; border: 1px solid {C['border']};
+                    border-radius: {radius}; padding: 10px 15px; text-align: left; font-weight: bold; font-size: 10pt;
+                }}
+                QPushButton:hover {{ background-color: {C['surface_h']}; }}
+            """
+
+        header.setStyleSheet(_header_qss(True))
 
         body = QFrame()
         body.setStyleSheet(f"QFrame {{ background: {C['card']}; border: 1px solid {C['border']}; border-top: none; border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }}")
@@ -2592,24 +2556,9 @@ class VPNApp(QMainWindow):
         def on_toggle():
             visible = not body.isVisible()
             body.setVisible(visible)
-            if visible:
-                header.setText(f"▼  {icon}  {title}")
-                header.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {C['surface']}; color: {C['fg']}; border: 1px solid {C['border']};
-                        border-radius: 8px 8px 0px 0px; padding: 10px 15px; text-align: left; font-weight: bold; font-size: 10pt;
-                    }}
-                    QPushButton:hover {{ background-color: {C['surface_h']}; }}
-                """)
-            else:
-                header.setText(f"▶  {icon}  {title}")
-                header.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {C['surface']}; color: {C['fg']}; border: 1px solid {C['border']};
-                        border-radius: 8px; padding: 10px 15px; text-align: left; font-weight: bold; font-size: 10pt;
-                    }}
-                    QPushButton:hover {{ background-color: {C['surface_h']}; }}
-                """)
+            arrow = "▼" if visible else "▶"
+            header.setText(f"{arrow}  {icon}  {title}")
+            header.setStyleSheet(_header_qss(visible))
 
         header.clicked.connect(on_toggle)
         layout.addWidget(header)
@@ -2645,6 +2594,7 @@ class VPNApp(QMainWindow):
         self.status_dot.set_color(color)
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color}; background: transparent;")
+        self._update_window_title()
         self._refresh_home_dashboard()
 
     def _build_home_summary_card(self, title: str, value: str, detail: str) -> QFrame:
@@ -2738,10 +2688,6 @@ class VPNApp(QMainWindow):
         sb = self.log_text.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-    # Kompatibilitäts-Wrapper
-    def append_log(self, msg: str):
-        self.sig.log_signal.emit(msg)
-
     # ── Configs ────────────────────────────────────────────────────────────
 
     def _tray_quick_connect(self, config_path: str):
@@ -2787,8 +2733,6 @@ class VPNApp(QMainWindow):
         text = f"⬆ Update {tag}  ({size_mb:.1f} MB)"
         self.btn_update.setText(text)
         self.btn_update.show()
-        self.btn_update_settings.setText(text)
-        self.btn_update_settings.show()
 
     def _on_update(self):
         info = self._update_info
@@ -2804,8 +2748,6 @@ class VPNApp(QMainWindow):
 
         self.btn_update.setEnabled(False)
         self.btn_update.setText("⬆ Lade herunter...")
-        self.btn_update_settings.setEnabled(False)
-        self.btn_update_settings.setText("⬆ Lade herunter...")
 
         def work():
             temp_dir = os.environ.get("TEMP", _base_dir)
@@ -2840,15 +2782,11 @@ class VPNApp(QMainWindow):
     def _on_update_failed(self):
         self.btn_update.setEnabled(True)
         self.btn_update.setText("⬆ Update fehlgeschlagen")
-        self.btn_update_settings.setEnabled(True)
-        self.btn_update_settings.setText("⬆ Update fehlgeschlagen")
         QMessageBox.critical(self, "Update", "Update fehlgeschlagen.")
 
     def _apply_update(self, new_exe: str):
         self.btn_update.setEnabled(False)
         self.btn_update.setText("⬆ Installiere...")
-        self.btn_update_settings.setEnabled(False)
-        self.btn_update_settings.setText("⬆ Installiere...")
         active_config = self.active_config
 
         def work():
@@ -2926,6 +2864,9 @@ class VPNApp(QMainWindow):
         self.btn_connect.setEnabled(False)
         self.btn_disconnect.setEnabled(True)
         self.btn_browser.setEnabled(reachable)
+
+        # Externen-Tunnel-Polling stoppen (wir wissen jetzt, dass wir verbunden sind)
+        self._external_tunnel_timer.stop()
         if reachable:
             log(f"Ziel {TARGET_IP}:{TARGET_PORT} erreichbar.")
         else:
@@ -3015,6 +2956,9 @@ class VPNApp(QMainWindow):
         self._refresh_in_progress = False
         self._active_ops.clear()
 
+        # Externen-Tunnel-Polling wieder starten (erkennt extern gestartete Tunnel)
+        self._external_tunnel_timer.start()
+
         # History-Eintrag abschließen
         if self._session_start_time > 0:
             duration = int(time.time() - self._session_start_time)
@@ -3038,7 +2982,6 @@ class VPNApp(QMainWindow):
     # ── VPN Disconnect ─────────────────────────────────────────────────────
 
     def _on_disconnect(self):
-        global _active_config
         self.btn_disconnect.setEnabled(False)
         self._set_status("Trenne...", C["yellow"])
 
@@ -3308,19 +3251,42 @@ class VPNApp(QMainWindow):
             self._loading = False
 
         # Bereits laufenden Tunnel erkennen und UI synchronisieren
-        if self._detect_existing_tunnel():
+        if self._detect_external_tunnel():
             _auto_connect = False
+
+        # Polling für nachträglich extern gestartete / gestoppte Tunnel
+        self._external_tunnel_timer.start()
 
         if _auto_connect:
             QTimer.singleShot(800, self._on_connect)
 
-    def _detect_existing_tunnel(self) -> bool:
-        """Erkennt beim Start bereits laufende WireGuard-Tunnel und passt UI an."""
-        global _active_config
+    def _detect_external_tunnel(self) -> bool:
+        """Periodisch prüfen, ob ein Tunnel extern gestartet/gestoppt wurde.
+
+        • Wenn wir NICHT verbunden sind, aber ein Tunnel läuft → UI auf 'verbunden' setzen.
+        • Wenn wir verbunden sind, aber der aktive Tunnel nicht mehr läuft
+          (und der Watchdog das nicht abdeckt, z.B. weil auto-reconnect aus ist)
+          → UI auf 'getrennt' setzen.
+        Gibt True zurück, wenn ein aktiver Tunnel erkannt/übernommen wurde.
+        """
+        if self.vpn_connected:
+            # --- Fall: Wir denken wir sind verbunden, aber extern wurde getrennt ---
+            if self.active_config:
+                tn = extract_tunnel_name(self.active_config)
+                if _service_state(tn) != "RUNNING":
+                    # Nur eingreifen wenn der Watchdog NICHT läuft (sonst
+                    # kümmert sich _watchdog_tick um den Reconnect)
+                    if not self._watchdog_timer.isActive():
+                        log(f"Extern getrennt erkannt: {tn}", "warning")
+                        self._disconnected()
+            return True
+
+        # --- Fall: Wir sind getrennt, aber vielleicht läuft ein externer Tunnel ---
         for idx, (name, path) in enumerate(self.configs):
             tn = extract_tunnel_name(path)
             if _service_state(tn) == "RUNNING":
-                log(f"Aktiven Tunnel erkannt: {tn}")
+                global _active_config
+                log(f"Aktiven/externen Tunnel erkannt: {tn}")
                 self.active_config = path
                 _active_config = path
                 self.vpn_connected = True
@@ -3328,7 +3294,7 @@ class VPNApp(QMainWindow):
                 self.btn_connect.setEnabled(False)
                 self.btn_disconnect.setEnabled(True)
                 self.btn_cancel.hide()
-                self._set_status("Verbunden (erkannt)", C["green"])
+                self._set_status("Verbunden", C["green"])
 
                 self._reconnect_retries = 0
                 self._connect_time = time.time()
@@ -3340,18 +3306,20 @@ class VPNApp(QMainWindow):
 
                 self.ping_label.show()
                 self._ping_timer.start()
-                self._watchdog_timer.start()
+
+                # Watchdog starten falls auto-reconnect aktiviert
+                if self.chk_auto_reconnect.isChecked():
+                    self._watchdog_timer.start()
 
                 self._transfer_timer.start()
                 self._transfer_tick()
 
-                # Browser-Button aktivieren falls Ziel gesetzt
                 self.btn_browser.setEnabled(bool(TARGET_IP))
 
                 threading.Thread(target=self._fetch_vpn_ip, args=(tn,), daemon=True).start()
 
                 if hasattr(self, '_tray') and self._tray:
-                    self._tray.setToolTip("VPN Connect - Verbunden")
+                    self._tray.setToolTip(f"VPN Connect - Verbunden ({tn})")
                     self._tray_act_toggle.setText("Trennen")
                     self._tray_act_toggle.setVisible(True)
                     self.tray_connect_menu.menuAction().setVisible(False)
@@ -3359,6 +3327,7 @@ class VPNApp(QMainWindow):
                 self._notify("VPN verbunden", f"{name} – erkannt.")
                 QTimer.singleShot(500, lambda: self.sig.auto_login_signal.emit())
                 self._update_window_title(tn)
+                self._apply_split_routes()
                 return True
         return False
 
@@ -3668,6 +3637,22 @@ class VPNApp(QMainWindow):
             return (0 if dev.get("id", "") in self._favorites else 1, dev.get("name", ""))
         devices_sorted = sorted(devices, key=_sort_key)
 
+        _btn_qss = f"""
+            QPushButton {{
+                background: {C['card']}; color: {C['fg']};
+                border: 1px solid {C['border']}; border-radius: 4px;
+                padding: 5px 12px; font-size: 9pt; font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background: {C['surface_h']}; border: 1px solid {C['border_l']};
+            }}
+            QPushButton:pressed {{ background: {C['surface']}; }}
+            QPushButton:disabled {{
+                background: {C['surface']}; color: rgba(255,255,255,0.3);
+                border: 1px solid {C['border']};
+            }}
+        """
+
         for d in devices_sorted:
             row = QFrame()
             row.setStyleSheet(f"""
@@ -3731,22 +3716,6 @@ class VPNApp(QMainWindow):
             star_btn.clicked.connect(
                 lambda checked, x=did, b=star_btn: self._toggle_favorite(x, b))
             row_layout.addWidget(star_btn)
-
-            _btn_qss = f"""
-                QPushButton {{
-                    background: {C['card']}; color: {C['fg']};
-                    border: 1px solid {C['border']}; border-radius: 4px;
-                    padding: 5px 12px; font-size: 9pt; font-weight: 500;
-                }}
-                QPushButton:hover {{
-                    background: {C['surface_h']}; border: 1px solid {C['border_l']};
-                }}
-                QPushButton:pressed {{ background: {C['surface']}; }}
-                QPushButton:disabled {{
-                    background: {C['surface']}; color: rgba(255,255,255,0.3);
-                    border: 1px solid {C['border']};
-                }}
-            """
 
             if online:
                 b = QPushButton("RDP")
@@ -3958,16 +3927,24 @@ class VPNApp(QMainWindow):
                     log(f"cmdkey Fehler: {e}", "warning")
 
             rdp_path = None
+            # Flags: DETACHED_PROCESS entkoppelt mstsc komplett vom Hauptprozess,
+            # CREATE_NO_WINDOW verhindert ein Konsolen-Fenster.  close_fds=True
+            # schliesst geerbte Handles – so kann mstsc das Hauptprogramm nicht
+            # "mitreissen" oder zum Absturz bringen.
+            _rdp_flags = CREATE_NO_WINDOW | 0x00000008   # 0x08 = DETACHED_PROCESS
+
             if self._rdp_redirections_requested():
                 rdp_path = os.path.join(
                     os.environ.get("TEMP", _base_dir),
                     f"_vpn_{_safe_rdp_filename(name)}.rdp")
                 self._write_rdp_file(rdp_path, ip, username, password)
-                subprocess.Popen(["mstsc.exe", rdp_path])
+                subprocess.Popen(["mstsc.exe", rdp_path],
+                                 creationflags=_rdp_flags, close_fds=True)
                 log(f"RDP gestartet: {rdp_path}")
             else:
                 args = self._build_mstsc_args(ip)
-                subprocess.Popen(args)
+                subprocess.Popen(args,
+                                 creationflags=_rdp_flags, close_fds=True)
                 log(f"RDP gestartet: {' '.join(args)}")
             if status_lbl:
                 QTimer.singleShot(2000, lambda: self.sig.device_status_signal.emit(
@@ -4294,7 +4271,6 @@ class VPNApp(QMainWindow):
         else:
             # Fallback: Statuslabel einfärben kurz
             self._set_status(title, C["red"] if level == "error" else C["yellow"])
-        self._append_log(f"[{title}] {msg}")
 
     def _export_support(self):
         """Erstellt ein Support-ZIP mit Log und anonymisierten Settings."""
@@ -4355,7 +4331,6 @@ class VPNApp(QMainWindow):
 
     def _add_history_entry(self, config: str, start_ts: float, duration_s: int):
         """Verbindung in den Verlauf eintragen (atomares Schreiben)."""
-        import datetime
         entry = {
             "config": config,
             "start": datetime.datetime.fromtimestamp(start_ts).strftime("%d.%m.%Y %H:%M"),
@@ -4563,6 +4538,7 @@ class VPNApp(QMainWindow):
         """Wirklich beenden (über Tray)."""
         global _active_config
         self._watchdog_timer.stop()   # kein Auto-Reconnect beim Beenden
+        self._external_tunnel_timer.stop()
         self._reconnect_retries = 0
         if self.active_config:
             disconnect_vpn(self.active_config)
@@ -4601,11 +4577,13 @@ class VPNApp(QMainWindow):
                 event.ignore()
                 return
             self._watchdog_timer.stop()   # kein Auto-Reconnect beim Beenden
+            self._external_tunnel_timer.stop()
             self._reconnect_retries = 0
             disconnect_vpn(self.active_config)
         _active_config = None
         self.active_config = None
         self._stop_auto_refresh()
+        self._external_tunnel_timer.stop()
         self._save_settings()
         _cleanup_temp_rdp()
         self._remove_split_routes()
@@ -4627,7 +4605,6 @@ def main():
 
     # Settings einlesen für Custom Accent Color vor UI-Erstellung
     try:
-        import json
         settings_file = os.path.join(_base_dir, "vpn_settings.json")
         if os.path.exists(settings_file):
             with open(settings_file, "r", encoding="utf-8") as f:
