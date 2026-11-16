@@ -38,7 +38,7 @@ from PyQt6.QtGui import (
 #  KONFIGURATION
 # =============================================================================
 
-APP_VERSION = "6.0.1"
+APP_VERSION = "6.0.3"
 APP_EXE_NAME = "VPN_Connect.exe"
 GITHUB_REPO = "JonasHofer01/VPN-Connect"   # owner/repo
 
@@ -757,11 +757,36 @@ def _parse_version(tag: str) -> tuple:
     tag = tag.lstrip("vV").strip()
     parts = []
     for p in tag.split("."):
+        clean_num = re.sub(r'[^0-9].*$', '', p)
         try:
-            parts.append(int(p))
+            parts.append(int(clean_num) if clean_num else 0)
         except ValueError:
             parts.append(0)
     return tuple(parts)
+
+
+def _is_installed_installation() -> bool:
+    """Prüft, ob die Anwendung über den Installer installiert wurde (z.B. in Program Files oder unins*.exe vorhanden)."""
+    if not getattr(sys, 'frozen', False):
+        return False
+    try:
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        if os.path.exists(exe_dir):
+            for fname in os.listdir(exe_dir):
+                fl = fname.lower()
+                if fl.startswith("unins") and fl.endswith(".exe"):
+                    return True
+        prog_files = [
+            os.environ.get("ProgramFiles"),
+            os.environ.get("ProgramFiles(x86)"),
+            os.environ.get("ProgramW6432"),
+        ]
+        for pf in prog_files:
+            if pf and os.path.abspath(exe_dir).lower().startswith(os.path.abspath(pf).lower()):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _select_update_assets(assets: list) -> Tuple[Optional[dict], Optional[dict]]:
@@ -772,19 +797,34 @@ def _select_update_assets(assets: list) -> Tuple[Optional[dict], Optional[dict]]
     if not exe_assets:
         return None, None
 
-    exe_asset = next(
-        (asset for asset in exe_assets
-         if str(asset.get("name", "")).lower() == "vpn_connect_setup.exe"),
-        next(
+    is_installed = _is_installed_installation()
+    if is_installed:
+        # Bei installierter Version Installer (Setup) bevorzugen
+        exe_asset = next(
             (asset for asset in exe_assets
-             if "setup" in str(asset.get("name", "")).lower()),
+             if str(asset.get("name", "")).lower() == "vpn_connect_setup.exe"),
             next(
                 (asset for asset in exe_assets
-                 if str(asset.get("name", "")).lower() == "vpn_connect.exe"),
+                 if "setup" in str(asset.get("name", "")).lower()),
+                next(
+                    (asset for asset in exe_assets
+                     if str(asset.get("name", "")).lower() == "vpn_connect.exe"),
+                    exe_assets[0]
+                )
+            )
+        )
+    else:
+        # Bei portabler Version Standalone-EXE bevorzugen
+        exe_asset = next(
+            (asset for asset in exe_assets
+             if str(asset.get("name", "")).lower() == "vpn_connect.exe"),
+            next(
+                (asset for asset in exe_assets
+                 if "setup" not in str(asset.get("name", "")).lower()),
                 exe_assets[0]
             )
         )
-    )
+
     exe_name = str(exe_asset.get("name", "")).lower()
     exe_stem = exe_name[:-4] if exe_name.endswith(".exe") else exe_name
 
@@ -818,7 +858,7 @@ def _select_update_assets(assets: list) -> Tuple[Optional[dict], Optional[dict]]
     return exe_asset, sha_asset
 
 
-def check_for_update() -> Optional[dict]:
+def check_for_update(raise_on_error: bool = False) -> Optional[dict]:
     api = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
     try:
         req = request.Request(api, headers={"Accept": "application/vnd.github+json",
@@ -847,6 +887,8 @@ def check_for_update() -> Optional[dict]:
 
             if not sha_hex:
                 log("Kein SHA256-Hash im Release gefunden – Update abgebrochen.", "error")
+                if raise_on_error:
+                    raise ValueError("Kein SHA256-Prüfsummen-Asset im Release gefunden.")
                 return None
 
             log(f"Update verfügbar: {remote_tag} (aktuell: {APP_VERSION})")
@@ -859,13 +901,19 @@ def check_for_update() -> Optional[dict]:
             }
         else:
             log("Release ohne .exe-Asset.", "warning")
+            if raise_on_error:
+                raise ValueError("Keine passende .exe-Datei im Release vorhanden.")
     except error.HTTPError as e:
         if e.code == 404:
             log("Kein Release auf GitHub vorhanden – Update-Check uebersprungen.")
         else:
             log(f"Update-Check fehlgeschlagen: HTTP {e.code}", "warning")
+        if raise_on_error:
+            raise
     except Exception as e:
         log(f"Update-Check fehlgeschlagen: {e}", "warning")
+        if raise_on_error:
+            raise
     return None
 
 
@@ -883,7 +931,11 @@ def _fetch_sha256(url: str) -> str:
 def download_update(url: str, dest: str, progress_cb=None,
                     expected_size: int = 0, expected_sha: Optional[str] = None) -> bool:
     try:
-        req = request.Request(url, headers={"User-Agent": "VPN-Connect-Updater"})
+        os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+        req = request.Request(url, headers={
+            "User-Agent": "VPN-Connect-Updater",
+            "Accept": "application/octet-stream"
+        })
         with request.urlopen(req, timeout=60) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             done = 0
@@ -900,17 +952,20 @@ def download_update(url: str, dest: str, progress_cb=None,
                         progress_cb(done, total)
         if expected_size and done != expected_size:
             log(f"Download-Größe stimmt nicht ({done} != {expected_size})", "error")
-            os.remove(dest)
+            if os.path.exists(dest):
+                os.remove(dest)
             return False
 
         file_sha = hasher.hexdigest()
         if expected_sha and file_sha.lower() != expected_sha.lower():
             log(f"SHA256 stimmt nicht überein (erwartet {expected_sha}, erhalten {file_sha})", "error")
-            os.remove(dest)
+            if os.path.exists(dest):
+                os.remove(dest)
             return False
         if expected_sha is None:
             log("Kein Hash angegeben – Sicherheitscheck schlägt fehl.", "error")
-            os.remove(dest)
+            if os.path.exists(dest):
+                os.remove(dest)
             return False
 
         log(f"Download abgeschlossen: {dest} (SHA256 {file_sha})")
@@ -918,7 +973,8 @@ def download_update(url: str, dest: str, progress_cb=None,
     except Exception as e:
         log(f"Download fehlgeschlagen: {e}", "error")
         try:
-            os.remove(dest)
+            if os.path.exists(dest):
+                os.remove(dest)
         except OSError:
             pass
         return False
@@ -945,6 +1001,7 @@ def apply_update(new_exe: str, exit_app: bool = True) -> bool:
         temp_dir = os.environ.get("TEMP", _base_dir)
         installer_ps1 = os.path.join(temp_dir, "_vpn_installer.ps1")
         installer_log = log_file
+        target_exe = _installed_exe_path()
         script = """$ErrorActionPreference = "Continue"
 $logFile = "{log_file}"
 "$(Get-Date -Format o) Installer-Skript gestartet" | Out-File $logFile -Append -Encoding UTF8
@@ -960,8 +1017,16 @@ try {{
 }} catch {{
     "$(Get-Date -Format o) Installer-Fehler: $_" | Out-File $logFile -Append -Encoding UTF8
 }}
+Remove-Item "{new_exe}" -Force -ErrorAction SilentlyContinue
+$targetExe = "{target_exe}"
+Start-Sleep -Seconds 2
+$running = Get-Process -Name "VPN_Connect" -ErrorAction SilentlyContinue
+if (-not $running -and (Test-Path $targetExe)) {{
+    "$(Get-Date -Format o) Starte installierte App neu: $targetExe" | Out-File $logFile -Append -Encoding UTF8
+    Start-Process $targetExe
+}}
 Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-""".format(pid=pid, new_exe=new_exe, log_file=installer_log)
+""".format(pid=pid, new_exe=new_exe, log_file=installer_log, target_exe=target_exe)
         try:
             with open(installer_ps1, "w", encoding="utf-8") as f:
                 f.write(script)
@@ -1088,16 +1153,22 @@ def _cleanup_old_exe():
     if not getattr(sys, 'frozen', False):
         return
     install_dir = os.path.dirname(os.path.abspath(sys.executable))
-    old = _installed_exe_path() + ".old"
-    if os.path.exists(old):
-        for _ in range(5):
-            try:
-                os.remove(old)
-                log(f"Alte Version gelöscht: {os.path.basename(old)}")
-                return
-            except PermissionError:
-                time.sleep(1)
-        log("Alte Version konnte nicht gelöscht werden.", "warning")
+    candidates = [
+        _installed_exe_path() + ".old",
+        sys.executable + ".old",
+    ]
+    for old in candidates:
+        if os.path.exists(old):
+            for _ in range(5):
+                try:
+                    os.remove(old)
+                    log(f"Alte Version gelöscht: {os.path.basename(old)}")
+                    break
+                except PermissionError:
+                    time.sleep(1)
+            else:
+                log(f"Alte Version konnte nicht gelöscht werden: {old}", "warning")
+
     stale_new = os.path.join(install_dir, "VPN_Connect_new.exe")
     if os.path.abspath(stale_new).lower() != os.path.abspath(sys.executable).lower():
         try:
@@ -1106,6 +1177,16 @@ def _cleanup_old_exe():
                 log("Veraltete Update-Datei gelöscht: VPN_Connect_new.exe")
         except OSError as e:
             log(f"Veraltete Update-Datei konnte nicht gelöscht werden: {e}", "warning")
+
+    # Temporäre Skripte aufräumen
+    temp_dir = os.environ.get("TEMP", _base_dir)
+    for stale_script in ("_vpn_updater.ps1", "_vpn_installer.ps1"):
+        p = os.path.join(temp_dir, stale_script)
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
 
 # =============================================================================
@@ -1484,6 +1565,9 @@ class AppSignals(QObject):
     update_failed_signal = pyqtSignal()
     apply_update_signal = pyqtSignal(str)
     update_ready_to_exit_signal = pyqtSignal()
+    update_not_found_signal = pyqtSignal(str)
+    update_check_failed_signal = pyqtSignal(str)
+    update_prompt_signal = pyqtSignal(dict)
     device_status_signal = pyqtSignal(object, str, str)  # label, text, color
     btns_state_signal = pyqtSignal(list, bool)            # btn_refs, enabled
     trigger_rdp_signal = pyqtSignal(str, str, list, object, str, str)  # ip, name, btns, lbl, user, pw
@@ -1676,7 +1760,6 @@ class VPNApp(QMainWindow):
 
         # Signale
         self.sig = AppSignals()
-        self._connect_signals()
 
         # Auto-Refresh Timer (alle 3 Sekunden)
         self._auto_refresh_timer = QTimer(self)
@@ -1690,6 +1773,7 @@ class VPNApp(QMainWindow):
 
         self._loading = True          # blockiert _save_settings während gesamter Initialisierung
         self._build_ui()
+        self._connect_signals()
         self._setup_tray()
         self._load_configs()
         self._load_credentials()      # setzt _loading=False am Ende selbst
@@ -1714,10 +1798,13 @@ class VPNApp(QMainWindow):
             lambda: (self.btn_login.setEnabled(True), self._mark_upsnap_logged_out()))
         self.sig.logged_in_signal.connect(self._on_logged_in)
         self.sig.update_available_signal.connect(self._show_update_btn)
-        self.sig.update_progress_signal.connect(self.btn_update.setText)
+        self.sig.update_progress_signal.connect(lambda txt: self.btn_update.setText(txt))
         self.sig.update_failed_signal.connect(self._on_update_failed)
         self.sig.apply_update_signal.connect(self._apply_update)
         self.sig.update_ready_to_exit_signal.connect(self._exit_for_update)
+        self.sig.update_not_found_signal.connect(self._on_update_not_found)
+        self.sig.update_check_failed_signal.connect(self._on_update_check_failed)
+        self.sig.update_prompt_signal.connect(self._on_update_prompt)
         self.sig.device_status_signal.connect(self._set_device_status)
         self.sig.btns_state_signal.connect(self._set_btns)
         self.sig.trigger_rdp_signal.connect(
@@ -2273,9 +2360,8 @@ class VPNApp(QMainWindow):
         support_btn.clicked.connect(self._export_support)
         support_row.addWidget(support_btn)
 
-        self.btn_update = _make_btn("⬇ Update suchen...", C["green"], "#000000", "#8fdf81")
-        self.btn_update.clicked.connect(self._on_update)
-        self.btn_update.hide()
+        self.btn_update = _make_btn("🔄 Nach Updates suchen", C["surface"], C["fg"], C["surface_h"])
+        self.btn_update.clicked.connect(self._on_update_clicked)
         support_row.addWidget(self.btn_update)
         
         support_row.addStretch()
@@ -2718,30 +2804,82 @@ class VPNApp(QMainWindow):
 
     # ── Auto-Update ────────────────────────────────────────────────────────
 
-    def _check_update_bg(self):
-        if not getattr(sys, 'frozen', False):
-            log("Update-Check im Python-Modus übersprungen.")
-            return
-        info = check_for_update()
-        if info:
-            self._update_info = info
-            self.sig.update_available_signal.emit(info)
+    def _check_update_bg(self, manual: bool = False):
+        try:
+            info = check_for_update(raise_on_error=manual)
+            if info:
+                self._update_info = info
+                self.sig.update_available_signal.emit(info)
+                if manual:
+                    self.sig.update_prompt_signal.emit(info)
+            else:
+                if manual:
+                    self.sig.update_not_found_signal.emit(APP_VERSION)
+        except Exception as e:
+            if manual:
+                self.sig.update_check_failed_signal.emit(str(e))
+            else:
+                log(f"Hintergrund-Update-Check fehlgeschlagen: {e}", "warning")
 
     def _show_update_btn(self, info: dict):
         tag = info["tag"]
         size_mb = info.get("size", 0) / (1024 * 1024)
-        text = f"⬆ Update {tag}  ({size_mb:.1f} MB)"
+        text = f"⬆ Update verfügbar: {tag} ({size_mb:.1f} MB)"
         self.btn_update.setText(text)
-        self.btn_update.show()
+        self.btn_update.setStyleSheet(
+            f"QPushButton {{ background-color: {C['green']}; color: #000000; font-weight: bold; "
+            f"border: none; border-radius: 6px; padding: 6px 12px; }} "
+            f"QPushButton:hover {{ background-color: #8fdf81; }}"
+        )
+        self.btn_update.setEnabled(True)
+        if hasattr(self, '_tray') and self._tray and self._tray.isVisible():
+            self._tray.showMessage(
+                "VPN Connect Update",
+                f"Neue Version {tag} ist verfügbar.",
+                QSystemTrayIcon.MessageIcon.Information,
+                4000
+            )
 
-    def _on_update(self):
-        info = self._update_info
-        if not info:
+    def _on_update_clicked(self):
+        if self._update_info:
+            self._start_update_download(self._update_info)
+        else:
+            self.btn_update.setEnabled(False)
+            self.btn_update.setText("⏳ Suche nach Updates...")
+            threading.Thread(target=self._check_update_bg, kwargs={"manual": True}, daemon=True).start()
+
+    def _on_update_not_found(self, current_ver: str):
+        self.btn_update.setEnabled(True)
+        self.btn_update.setText("🔄 Nach Updates suchen")
+        QMessageBox.information(
+            self, "Update-Prüfung",
+            f"Sie nutzen bereits die neueste Version (v{current_ver})."
+        )
+
+    def _on_update_check_failed(self, err_msg: str):
+        self.btn_update.setEnabled(True)
+        self.btn_update.setText("🔄 Nach Updates suchen")
+        QMessageBox.warning(
+            self, "Update-Prüfung",
+            f"Update-Prüfung fehlgeschlagen:\n{err_msg}\n\nBitte prüfen Sie Ihre Internetverbindung."
+        )
+
+    def _on_update_prompt(self, info: dict):
+        self._start_update_download(info)
+
+    def _start_update_download(self, info: dict):
+        if not getattr(sys, 'frozen', False):
+            QMessageBox.information(
+                self, "Update verfügbar",
+                f"Version {info['tag']} ist auf GitHub verfügbar!\n\n"
+                f"Ein automatisches Update wird nur in der kompilierten EXE-Version unterstützt."
+            )
             return
+
         reply = QMessageBox.question(
-            self, "Update",
-            f"Version {info['tag']} herunterladen und installieren?\n\n"
-            f"Die App wird nach dem Update automatisch neu gestartet.",
+            self, "Update verfügbar",
+            f"Neue Version {info['tag']} herunterladen und installieren?\n\n"
+            f"Die Anwendung wird nach dem Update automatisch neu gestartet.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes:
             return
@@ -2751,8 +2889,6 @@ class VPNApp(QMainWindow):
 
         def work():
             temp_dir = os.environ.get("TEMP", _base_dir)
-            # Originalen Asset-Namen verwenden, damit apply_update erkennen
-            # kann ob es ein Installer ("setup" im Namen) ist
             original_name = info.get("name", f"VPN_Connect_update_{os.getpid()}.exe")
             dest = os.path.join(temp_dir, original_name)
             expected_sha = info.get("sha")
@@ -2781,8 +2917,16 @@ class VPNApp(QMainWindow):
 
     def _on_update_failed(self):
         self.btn_update.setEnabled(True)
-        self.btn_update.setText("⬆ Update fehlgeschlagen")
-        QMessageBox.critical(self, "Update", "Update fehlgeschlagen.")
+        if self._update_info:
+            self._show_update_btn(self._update_info)
+        else:
+            self.btn_update.setText("🔄 Nach Updates suchen")
+            self.btn_update.setStyleSheet(
+                f"QPushButton {{ background-color: {C['surface']}; color: {C['fg']}; "
+                f"border: 1px solid {C['border']}; border-radius: 6px; padding: 6px 12px; }} "
+                f"QPushButton:hover {{ background-color: {C['surface_h']}; }}"
+            )
+        QMessageBox.critical(self, "Update", "Update-Download oder -Installation ist fehlgeschlagen.")
 
     def _apply_update(self, new_exe: str):
         self.btn_update.setEnabled(False)

@@ -47,7 +47,7 @@ def main():
     # 3. Git Commit und Push
     print("Erstelle Git Commit...")
     try:
-        subprocess.run(["git", "add", "vpn_connect.py", "VPN_Connect.iss", "build.ps1"], check=True)
+        subprocess.run(["git", "add", "vpn_connect.py", "VPN_Connect.iss", "build.ps1", ".github/workflows/build.yml", "release.py"], check=True)
         subprocess.run(["git", "commit", "-m", f"Bump version to {new_version}"], check=True)
         
         print("Pushe zum Repository...")
